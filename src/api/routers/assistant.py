@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 from src.database.sql_session import get_db
@@ -20,11 +21,11 @@ class AssistantCreate(BaseModel):
     temperature: float = 0.7
     system_prompt: Optional[str] = None
     greeting_message: Optional[str] = None # New: Opening remarks
-    memory_config: Optional[dict] = {"enable": True, "window_size": 10}
-    kb_ids: Optional[List[int]] = []
-    rag_config: Optional[dict] = {"top_k": 5, "enable_rerank": True}
-    tool_config: Optional[List[str]] = []
-    agent_ids: Optional[List[int]] = []
+    memory_config: Optional[dict] = Field(default_factory=lambda: {"enable": True, "window_size": 10})
+    kb_ids: Optional[List[int]] = Field(default_factory=list)
+    rag_config: Optional[dict] = Field(default_factory=lambda: {"top_k": 5, "enable_rerank": True})
+    tool_config: Optional[List[str]] = Field(default_factory=list)
+    agent_ids: Optional[List[int]] = Field(default_factory=list)
 
 class AssistantUpdate(BaseModel):
     name: Optional[str] = None
@@ -58,19 +59,52 @@ class AssistantOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+def _validate_bindings(
+    kb_ids: Optional[List[int]],
+    agent_ids: Optional[List[int]],
+    user_id: int,
+    db: Session,
+) -> None:
+    """Prevent an Assistant from referencing inaccessible KBs or Agents."""
+    normalized_kb_ids = set(kb_ids or [])
+    if normalized_kb_ids:
+        accessible_kbs = {
+            row[0]
+            for row in (
+                db.query(KnowledgeBase.id)
+                .filter(
+                    KnowledgeBase.id.in_(normalized_kb_ids),
+                    or_(KnowledgeBase.owner_id == user_id, KnowledgeBase.is_public.is_(True)),
+                )
+                .all()
+            )
+        }
+        denied = sorted(normalized_kb_ids - accessible_kbs)
+        if denied:
+            raise HTTPException(status_code=403, detail=f"Knowledge base access denied: {denied}")
+
+    normalized_agent_ids = set(agent_ids or [])
+    if normalized_agent_ids:
+        owned_agents = {
+            row[0]
+            for row in (
+                db.query(Agent.id)
+                .filter(Agent.id.in_(normalized_agent_ids), Agent.user_id == user_id)
+                .all()
+            )
+        }
+        denied = sorted(normalized_agent_ids - owned_agents)
+        if denied:
+            raise HTTPException(status_code=403, detail=f"Agent access denied: {denied}")
+
 @router.post("/", response_model=AssistantOut)
 def create_assistant(
     assistant_in: AssistantCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Verify KBs exist and belong to user
-    if assistant_in.kb_ids:
-        kbs = db.query(KnowledgeBase).filter(KnowledgeBase.id.in_(assistant_in.kb_ids)).all()
-        # Basic check, detailed ownership check can be added
-        if len(kbs) != len(assistant_in.kb_ids):
-             # Or just ignore invalid ones? Let's be strict
-             pass 
+    _validate_bindings(assistant_in.kb_ids, assistant_in.agent_ids, current_user.id, db)
 
     assistant = Assistant(
         name=assistant_in.name,
@@ -125,6 +159,12 @@ def update_assistant(
         raise HTTPException(status_code=403, detail="Not authorized")
     
     update_data = assistant_in.dict(exclude_unset=True)
+    _validate_bindings(
+        update_data.get("kb_ids", assistant.kb_ids),
+        update_data.get("agent_ids", assistant.agent_ids),
+        current_user.id,
+        db,
+    )
     for field, value in update_data.items():
         setattr(assistant, field, value)
         
@@ -163,6 +203,11 @@ def create_assistant_version(
 ):
     # Mock implementation until DB migration
     # In real world, we save to AssistantVersion table
+    assistant = db.query(Assistant).filter(Assistant.id == assistant_id).first()
+    if not assistant:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    if assistant.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
     if assistant_id not in MOCK_VERSIONS:
         MOCK_VERSIONS[assistant_id] = []
     
@@ -182,4 +227,9 @@ def list_assistant_versions(
     db: Session = Depends(get_db)
 ):
     # Mock return
+    assistant = db.query(Assistant).filter(Assistant.id == assistant_id).first()
+    if not assistant:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    if assistant.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
     return MOCK_VERSIONS.get(assistant_id, [])

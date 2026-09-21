@@ -1,21 +1,98 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 from pydantic import BaseModel
 import json
 import uuid
+import asyncio
 
 from src.database.sql_session import get_db, SessionLocal
-from src.database.models import ChatSession, ChatInteraction, User, KnowledgeBase, Assistant
+from src.database.models import ChatSession, ChatInteraction, User, KnowledgeBase, Assistant, Agent
 from src.services.rag_service import RAGService
 from src.services.memory_service import MemorySystem
+from src.services.assistant_agent_orchestrator import AssistantAgentOrchestrator
 from src.api.dependencies import get_current_user
 from src.utils.logger import logger
 
 router = APIRouter()
 rag_service = RAGService()
 memory_system = MemorySystem()
+
+
+def _agent_config(agent: Agent) -> dict:
+    """Create an immutable configuration snapshot for an Assistant chat turn."""
+    return {
+        "system_prompt": agent.system_prompt,
+        "tools_config": agent.tools_config or {},
+        "knowledge_config": agent.knowledge_config or {},
+        "memory_config": agent.memory_config or {},
+        "reasoning_config": agent.reasoning_config or {},
+        "security_config": agent.security_config or {},
+        "interaction_config": agent.interaction_config or {},
+        "llm_config": agent.llm_config or {},
+        "execution_config": agent.execution_config or {},
+    }
+
+
+def _resolve_assistant_config(
+    assistant: Optional[Assistant],
+    requested_kb_id: Optional[int],
+    user_id: int,
+    db: Session,
+) -> tuple[dict, List[int]]:
+    """Resolve only resources the current user is allowed to execute."""
+    raw_kb_ids = (assistant.kb_ids or []) if assistant else ([requested_kb_id] if requested_kb_id else [])
+    try:
+        kb_ids = sorted({int(value) for value in raw_kb_ids})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Knowledge base IDs must be integers") from exc
+
+    valid_kb_ids: List[int] = []
+    if kb_ids:
+        valid_kb_ids = [
+            row[0]
+            for row in (
+                db.query(KnowledgeBase.id)
+                .filter(
+                    KnowledgeBase.id.in_(kb_ids),
+                    or_(KnowledgeBase.owner_id == user_id, KnowledgeBase.is_public.is_(True)),
+                )
+                .all()
+            )
+        ]
+        denied = sorted(set(kb_ids) - set(valid_kb_ids))
+        if denied:
+            raise HTTPException(status_code=403, detail=f"Knowledge base access denied: {denied}")
+
+    raw_agent_ids = (assistant.agent_ids or []) if assistant else []
+    try:
+        agent_ids = list(dict.fromkeys(int(value) for value in raw_agent_ids))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Agent IDs must be integers") from exc
+
+    agents_by_id = {}
+    if agent_ids:
+        owned_agents = db.query(Agent).filter(Agent.id.in_(agent_ids), Agent.user_id == user_id).all()
+        agents_by_id = {agent.id: agent for agent in owned_agents}
+        denied = [agent_id for agent_id in agent_ids if agent_id not in agents_by_id]
+        if denied:
+            raise HTTPException(status_code=403, detail=f"Agent access denied: {denied}")
+
+    config = {
+        "llm_model": assistant.llm_model if assistant else "qwen-max",
+        "temperature": assistant.temperature if assistant else 0.7,
+        "system_prompt": assistant.system_prompt if assistant else None,
+        "memory_config": assistant.memory_config if assistant else None,
+        "rag_config": assistant.rag_config if assistant else None,
+        "tool_config": assistant.tool_config if assistant else None,
+        "agents": [
+            {"id": agent_id, "name": agents_by_id[agent_id].name, "config": _agent_config(agents_by_id[agent_id])}
+            for agent_id in agent_ids
+        ],
+    }
+    return config, valid_kb_ids
 
 
 class ChatRequest(BaseModel):
@@ -58,7 +135,7 @@ class MessageOut(BaseModel):
 
 
 @router.post("/", response_model=ChatResponse)
-def chat(
+async def chat(
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -80,10 +157,8 @@ def chat(
     Raises:
         HTTPException: 当助手不存在、无权限访问助手或会话时抛出404或403错误
     """
-    # 解析助手配置和知识库列表
+    # 解析助手配置
     assistant = None
-    kb_ids = []
-    
     if request.assistant_id:
         assistant = db.query(Assistant).filter(Assistant.id == request.assistant_id).first()
         if not assistant:
@@ -91,17 +166,10 @@ def chat(
         if assistant.user_id != current_user.id:
              raise HTTPException(status_code=403, detail="Not authorized for this assistant")
         
-        kb_ids = assistant.kb_ids or []
-    elif request.kb_id:
-        kb_ids = [request.kb_id]
-    
-    # 验证知识库权限，仅保留用户有权访问的知识库
-    valid_kb_ids = []
-    if kb_ids:
-        kbs = db.query(KnowledgeBase).filter(KnowledgeBase.id.in_(kb_ids)).all()
-        for kb in kbs:
-            if kb.owner_id == current_user.id or kb.is_public:
-                valid_kb_ids.append(kb.id)
+
+    assistant_config, valid_kb_ids = _resolve_assistant_config(
+        assistant, request.kb_id, current_user.id, db
+    )
     
     # 管理会话：创建新会话或复用现有会话
     session_uid = request.session_id
@@ -132,24 +200,23 @@ def chat(
         if chat_session.user_id != current_user.id:
             raise HTTPException(status_code=403, detail="Not authorized to access this session")
 
-    # 构建助手配置参数并调用RAG服务进行问答
-    assistant_config = {
-        "llm_model": assistant.llm_model if assistant else "qwen-max",
-        "temperature": assistant.temperature if assistant else 0.7,
-        "system_prompt": assistant.system_prompt if assistant else None,
-        "memory_config": assistant.memory_config if assistant else None,
-        "rag_config": assistant.rag_config if assistant else None,
-        "tool_config": assistant.tool_config if assistant else None,
-        "agent_ids": assistant.agent_ids if assistant else None
-    }
-    
-    result = rag_service.query(
-        query_text=request.query,
-        top_k=request.top_k,
-        session_id=session_uid,
-        kb_ids=valid_kb_ids,
-        assistant_config=assistant_config
-    )
+    # 已绑定 Agent 的助手走真实 Agent 执行链；普通助手继续使用 RAG。
+    if assistant_config["agents"]:
+        result = await AssistantAgentOrchestrator().run(
+            question=request.query,
+            agents=assistant_config["agents"],
+            session_id=session_uid,
+            user_id=current_user.id,
+        )
+    else:
+        result = await asyncio.to_thread(
+            rag_service.query,
+            query_text=request.query,
+            top_k=request.top_k,
+            session_id=session_uid,
+            kb_ids=valid_kb_ids,
+            assistant_config=assistant_config,
+        )
     
     # 保存交互记录到数据库
     interaction = ChatInteraction(
@@ -158,7 +225,7 @@ def chat(
         query=request.query,
         answer=result["answer"],
         retrieved_docs=result.get("source_documents"),
-        metrics={}
+        metrics={"agent_trace": result.get("tool_trace", [])}
     )
     db.add(interaction)
     db.commit()
@@ -183,9 +250,8 @@ async def chat_stream(
     与 POST / 返回 JSON 不同，此接口使用 Server-Sent Events 逐 token
     推送 LLM 生成内容，前端可实时展示打字机效果。
     """
-    # 解析助手配置和知识库列表（同步，与非流式接口逻辑一致）
+    # 解析助手配置（同步，与非流式接口逻辑一致）
     assistant = None
-    kb_ids = []
 
     if request.assistant_id:
         assistant = db.query(Assistant).filter(Assistant.id == request.assistant_id).first()
@@ -193,16 +259,10 @@ async def chat_stream(
             raise HTTPException(status_code=404, detail="Assistant not found")
         if assistant.user_id != current_user.id:
             raise HTTPException(status_code=403, detail="Not authorized for this assistant")
-        kb_ids = assistant.kb_ids or []
-    elif request.kb_id:
-        kb_ids = [request.kb_id]
 
-    valid_kb_ids = []
-    if kb_ids:
-        kbs = db.query(KnowledgeBase).filter(KnowledgeBase.id.in_(kb_ids)).all()
-        for kb in kbs:
-            if kb.owner_id == current_user.id or kb.is_public:
-                valid_kb_ids.append(kb.id)
+    assistant_config, valid_kb_ids = _resolve_assistant_config(
+        assistant, request.kb_id, current_user.id, db
+    )
 
     # 管理会话
     session_uid = request.session_id
@@ -232,37 +292,66 @@ async def chat_stream(
         if chat_session.user_id != current_user.id:
             raise HTTPException(status_code=403, detail="Not authorized to access this session")
 
-    assistant_config = {
-        "llm_model": assistant.llm_model if assistant else "qwen-max",
-        "temperature": assistant.temperature if assistant else 0.7,
-        "system_prompt": assistant.system_prompt if assistant else None,
-        "memory_config": assistant.memory_config if assistant else None,
-        "rag_config": assistant.rag_config if assistant else None,
-        "tool_config": assistant.tool_config if assistant else None,
-        "agent_ids": assistant.agent_ids if assistant else None
-    }
-
     async def event_generator():
         """SSE 事件生成器：逐 token 推送，流结束后保存交互记录。"""
         full_answer = ""
         source_docs = None
+        agent_trace = []
+        agent_task = None
 
         # 立即推送 session_id，方便前端追踪新会话
         yield f"data: {json.dumps({'type': 'session_id', 'session_id': session_uid}, ensure_ascii=False)}\n\n"
 
         try:
-            async for event in rag_service.query_stream(
-                query_text=request.query,
-                top_k=request.top_k,
-                session_id=session_uid,
-                kb_ids=valid_kb_ids,
-                assistant_config=assistant_config,
-            ):
-                if event["type"] == "token":
-                    full_answer += event["content"]
-                elif event["type"] == "sources":
-                    source_docs = event["data"]
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if assistant_config["agents"]:
+                event_queue: asyncio.Queue = asyncio.Queue()
+
+                async def emit(event_type: str, payload: dict) -> None:
+                    await event_queue.put(
+                        {"type": "agent_event", "event": event_type, "data": payload}
+                    )
+
+                agent_task = asyncio.create_task(
+                    AssistantAgentOrchestrator().run(
+                        question=request.query,
+                        agents=assistant_config["agents"],
+                        session_id=session_uid,
+                        user_id=current_user.id,
+                        emit=emit,
+                    )
+                )
+                while not agent_task.done() or not event_queue.empty():
+                    try:
+                        event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
+                    agent_trace.append(event)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                result = await agent_task
+                full_answer = result["answer"]
+                source_docs = result.get("source_documents", [])
+                yield f"data: {json.dumps({'type': 'token', 'content': full_answer}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'sources', 'data': source_docs}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+            else:
+                async for event in rag_service.query_stream(
+                    query_text=request.query,
+                    top_k=request.top_k,
+                    session_id=session_uid,
+                    kb_ids=valid_kb_ids,
+                    assistant_config=assistant_config,
+                ):
+                    if event["type"] == "token":
+                        full_answer += event["content"]
+                    elif event["type"] == "sources":
+                        source_docs = event["data"]
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            if agent_task and not agent_task.done():
+                agent_task.cancel()
+                await asyncio.gather(agent_task, return_exceptions=True)
+            raise
         except Exception as e:
             logger.error(f"Streaming error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
@@ -284,7 +373,7 @@ async def chat_stream(
                         query=request.query,
                         answer=full_answer,
                         retrieved_docs=source_docs or [],
-                        metrics={}
+                        metrics={"agent_events": agent_trace}
                     )
                     new_db.add(interaction)
                     new_db.commit()

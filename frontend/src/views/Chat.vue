@@ -93,6 +93,13 @@
       <div class="messages" ref="messagesContainer">
         <div v-for="(msg, index) in messages" :key="index" :class="['message', msg.role]">
           <div class="message-content" style="white-space: pre-wrap;">{{ msg.content }}</div>
+          <details v-if="msg.trace && msg.trace.length" class="agent-trace">
+            <summary>Agent 执行轨迹（{{ msg.trace.length }}）</summary>
+            <div v-for="(item, traceIndex) in msg.trace" :key="traceIndex" class="trace-item">
+              <span class="trace-agent">{{ item.data?.agent_name || 'Agent' }}</span>
+              <span>{{ formatTraceEvent(item) }}</span>
+            </div>
+          </details>
           <div v-if="msg.sources && msg.sources.length" class="sources">
             <small>来源：</small>
             <ul>
@@ -312,6 +319,27 @@ const newChat = () => {
 
 const getToken = () => localStorage.getItem('token')
 
+const traceLabels = {
+  'agent.started': '开始分析',
+  'agent.thinking': '正在推理',
+  'tool.started': '调用工具',
+  'tool.completed': '工具完成',
+  'tool.failed': '工具失败',
+  'agent.finalizing': '整理结论',
+  'agent.completed': '分析完成',
+  'agent.failed': '执行失败',
+  'retrieval.started': '开始检索',
+  'retrieval.completed': '检索完成',
+}
+
+const formatTraceEvent = (item) => {
+  const label = traceLabels[item.event] || item.event
+  const tool = item.data?.tool ? `：${item.data.tool}` : ''
+  const step = item.data?.step ? `（步骤 ${item.data.step}）` : ''
+  const error = item.data?.error ? `：${item.data.error}` : ''
+  return `${label}${tool}${step}${error}`
+}
+
 const sendMessage = async () => {
   if (!inputQuery.value.trim()) return
 
@@ -345,7 +373,7 @@ const sendMessage = async () => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
     usedStreaming = true
-    const assistantMsg = { role: 'assistant', content: '' }
+    const assistantMsg = { role: 'assistant', content: '', trace: [] }
     messages.value.push(assistantMsg)
     scrollToBottom()
 
@@ -374,6 +402,10 @@ const sendMessage = async () => {
           } else if (data.type === 'sources') {
             const lastIdx = messages.value.length - 1
             messages.value[lastIdx].sources = data.data
+          } else if (data.type === 'agent_event') {
+            const lastIdx = messages.value.length - 1
+            messages.value[lastIdx].trace.push(data)
+            scrollToBottom()
           } else if (data.type === 'error') {
             const lastIdx = messages.value.length - 1
             messages.value[lastIdx].content = `错误: ${data.message}`
@@ -528,6 +560,28 @@ watch(selectedAssistant, (newVal) => {
   margin-top: 5px;
   font-size: 0.8em;
   color: #666;
+}
+.agent-trace {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  color: #606266;
+  font-size: 0.82em;
+}
+.agent-trace summary {
+  cursor: pointer;
+  color: #409eff;
+}
+.trace-item {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.trace-agent {
+  min-width: 90px;
+  font-weight: 600;
+  color: #303133;
 }
 .config-select {
   width: 100%;
