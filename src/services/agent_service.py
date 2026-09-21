@@ -1,0 +1,296 @@
+"""LangGraph-based cryptographic-protocol analysis Agent."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, TypedDict
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+
+from src.llm.llm_client import LLMClient
+from src.services.crypto_tools import lookup_protocol as lookup_protocol_record
+from src.services.crypto_tools import validate_crypto_parameters as validate_crypto_parameters_record
+from src.services.memory_service import MemorySystem
+
+
+EventCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
+
+
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+    steps: int
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+        return "".join(parts)
+    return str(content or "")
+
+
+class AgentService:
+    """Build and execute one bounded Agent graph for each request."""
+
+    TOOL_ALIASES = {
+        "search": "search_knowledge_base",
+        "knowledge_search": "search_knowledge_base",
+        "protocol": "lookup_protocol",
+        "parameter_validation": "validate_crypto_parameters",
+    }
+    DEFAULT_TOOLS = [
+        "search_knowledge_base",
+        "lookup_protocol",
+        "validate_crypto_parameters",
+    ]
+
+    def __init__(
+        self,
+        llm_client: LLMClient | None = None,
+        memory: MemorySystem | None = None,
+        retriever_factory: Callable[[], Any] | None = None,
+    ):
+        self.llm_client = llm_client or LLMClient()
+        self.memory = memory
+        self.retriever_factory = retriever_factory
+
+    @staticmethod
+    async def _noop_event(_: str, __: Dict[str, Any]) -> None:
+        return None
+
+    def _enabled_tool_names(self, config: Dict[str, Any]) -> List[str]:
+        configured = config.get("tools_config") or {}
+        names = configured.get("enabled_tools")
+        if names is None:
+            names = configured.get("tools")
+        if not names:
+            names = list(self.DEFAULT_TOOLS)
+        if not isinstance(names, list):
+            raise ValueError("tools_config.tools must be a list")
+
+        normalized = []
+        for raw_name in names:
+            name = self.TOOL_ALIASES.get(str(raw_name), str(raw_name))
+            if name not in self.DEFAULT_TOOLS:
+                raise ValueError(f"Agent configuration contains an unsupported tool: {raw_name}")
+            if name not in normalized:
+                normalized.append(name)
+        return normalized
+
+    def _build_tools(
+        self,
+        config: Dict[str, Any],
+        emit: EventCallback,
+        tool_trace: List[Dict[str, Any]],
+        cancel_event: asyncio.Event,
+    ) -> Dict[str, Any]:
+        knowledge_config = config.get("knowledge_config") or {}
+        kb_ids = [int(value) for value in knowledge_config.get("kb_ids", [])]
+        configured_top_k = min(max(int(knowledge_config.get("top_k", 5)), 1), 20)
+
+        @tool("search_knowledge_base")
+        async def search_knowledge_base(query: str, top_k: int = 5) -> Dict[str, Any]:
+            """Search bound cryptography papers, protocol specifications, and security definitions."""
+            if cancel_event.is_set():
+                raise asyncio.CancelledError
+            if not kb_ids:
+                return {"results": [], "message": "No knowledge base is bound to this Agent."}
+            await emit("retrieval.started", {"query": query, "kb_ids": kb_ids})
+            if self.retriever_factory is None:
+                from src.retrieval.vector_retriever import VectorRetriever
+
+                retriever = await asyncio.to_thread(VectorRetriever)
+            else:
+                retriever = self.retriever_factory()
+            limit = min(max(int(top_k), 1), configured_top_k)
+            results = await asyncio.to_thread(
+                retriever.retrieve,
+                query,
+                limit,
+                None,
+                kb_ids,
+            )
+            documents = [
+                {
+                    "id": result.id,
+                    "text": result.text,
+                    "score": result.score,
+                    "metadata": result.metadata,
+                }
+                for result in results
+            ]
+            await emit("retrieval.completed", {"query": query, "count": len(documents)})
+            return {"results": documents}
+
+        @tool("lookup_protocol")
+        def lookup_protocol(protocol: str) -> Dict[str, Any]:
+            """Look up a concise standards-oriented description of a known cryptographic protocol."""
+            return lookup_protocol_record(protocol)
+
+        @tool("validate_crypto_parameters")
+        def validate_crypto_parameters(
+            algorithm: str,
+            key_size: int | None = None,
+            curve: str | None = None,
+            hash_name: str | None = None,
+            nonce_reuse_possible: bool = False,
+        ) -> Dict[str, Any]:
+            """Check common cryptographic parameters and return structured security findings."""
+            return validate_crypto_parameters_record(
+                algorithm=algorithm,
+                key_size=key_size,
+                curve=curve,
+                hash_name=hash_name,
+                nonce_reuse_possible=nonce_reuse_possible,
+            )
+
+        registry = {
+            search_knowledge_base.name: search_knowledge_base,
+            lookup_protocol.name: lookup_protocol,
+            validate_crypto_parameters.name: validate_crypto_parameters,
+        }
+        return {name: registry[name] for name in self._enabled_tool_names(config)}
+
+    async def run(
+        self,
+        question: str,
+        config: Dict[str, Any],
+        *,
+        session_id: str | None = None,
+        emit: EventCallback | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> Dict[str, Any]:
+        if not self.llm_client.llm:
+            raise RuntimeError("LLM service is unavailable")
+        if not question.strip():
+            raise ValueError("Question cannot be empty")
+
+        emit = emit or self._noop_event
+        cancel_event = cancel_event or asyncio.Event()
+        tool_trace: List[Dict[str, Any]] = []
+        tools = self._build_tools(config, emit, tool_trace, cancel_event)
+        base_model = self.llm_client.llm
+        model = base_model.bind_tools(list(tools.values())) if tools else base_model
+        max_steps = min(max(int((config.get("reasoning_config") or {}).get("max_steps", 6)), 1), 12)
+        allow_parallel = bool((config.get("reasoning_config") or {}).get("allow_parallel", True))
+
+        async def call_agent(state: AgentState) -> Dict[str, Any]:
+            if cancel_event.is_set():
+                raise asyncio.CancelledError
+            step = state.get("steps", 0) + 1
+            await emit("agent.thinking", {"step": step, "max_steps": max_steps})
+            response = await model.ainvoke(state["messages"])
+            return {"messages": [response], "steps": step}
+
+        async def execute_one(call: Dict[str, Any]) -> ToolMessage:
+            if cancel_event.is_set():
+                raise asyncio.CancelledError
+            name = call.get("name")
+            implementation = tools.get(name)
+            if implementation is None:
+                raise ValueError(f"Model requested a tool that is not enabled: {name}")
+            arguments = call.get("args") or {}
+            await emit("tool.started", {"tool": name, "arguments": arguments})
+            try:
+                result = await implementation.ainvoke(arguments)
+                trace_item = {"tool": name, "arguments": arguments, "result": result}
+                tool_trace.append(trace_item)
+                await emit("tool.completed", trace_item)
+                return ToolMessage(
+                    content=json.dumps(result, ensure_ascii=False, default=str),
+                    tool_call_id=call["id"],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                trace_item = {"tool": name, "arguments": arguments, "error": str(exc)}
+                tool_trace.append(trace_item)
+                await emit("tool.failed", trace_item)
+                return ToolMessage(content=f"Tool error: {exc}", tool_call_id=call["id"])
+
+        async def call_tools(state: AgentState) -> Dict[str, Any]:
+            calls = getattr(state["messages"][-1], "tool_calls", None) or []
+            if allow_parallel and len(calls) > 1:
+                messages = await asyncio.gather(*(execute_one(call) for call in calls))
+            else:
+                messages = [await execute_one(call) for call in calls]
+            return {"messages": messages, "steps": state.get("steps", 0)}
+
+        async def finalize(state: AgentState) -> Dict[str, Any]:
+            await emit("agent.finalizing", {"reason": "step_limit"})
+            response = await base_model.ainvoke(
+                state["messages"]
+                + [SystemMessage(content="Tool budget is exhausted. Give the best grounded final answer now without calling tools.")]
+            )
+            return {"messages": [response], "steps": state.get("steps", 0)}
+
+        def route(state: AgentState) -> str:
+            last = state["messages"][-1]
+            calls = getattr(last, "tool_calls", None) or []
+            if not calls:
+                return "end"
+            return "tools"
+
+        def after_tools(state: AgentState) -> str:
+            return "finalize" if state.get("steps", 0) >= max_steps else "agent"
+
+        graph = StateGraph(AgentState)
+        graph.add_node("agent", call_agent)
+        graph.add_node("tools", call_tools)
+        graph.add_node("finalize", finalize)
+        graph.add_edge(START, "agent")
+        graph.add_conditional_edges("agent", route, {"tools": "tools", "end": END})
+        graph.add_conditional_edges("tools", after_tools, {"agent": "agent", "finalize": "finalize"})
+        graph.add_edge("finalize", END)
+        runnable = graph.compile()
+
+        memory_config = config.get("memory_config") or {}
+        memory = self.memory
+        history: List[Dict[str, str]] = []
+        if session_id and memory_config.get("enable_short_term", True):
+            if memory is None:
+                memory = MemorySystem()
+            history = await asyncio.to_thread(
+                memory.get_short_term_memory,
+                session_id,
+                min(max(int(memory_config.get("window_size", 10)), 1), 50),
+            )
+
+        history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history)
+        system_prompt = config.get("system_prompt") or (
+            "你是密码协议辅助分析 Agent。优先使用绑定知识库中的论文、标准和安全定义作为证据；"
+            "涉及算法参数时调用参数校验工具；区分标准事实、检索证据和你的推断；"
+            "不要编造协议条款或安全结论，并在结论中标明来源。"
+        )
+        if history_text:
+            system_prompt += f"\n\n最近会话上下文：\n{history_text}"
+
+        await emit("run.started", {"enabled_tools": list(tools), "max_steps": max_steps})
+        result = await runnable.ainvoke(
+            {
+                "messages": [SystemMessage(content=system_prompt), HumanMessage(content=question)],
+                "steps": 0,
+            }
+        )
+        if cancel_event.is_set():
+            raise asyncio.CancelledError
+
+        answer = _message_text(result["messages"][-1].content)
+        if not answer:
+            answer = (config.get("execution_config") or {}).get("fallback_response") or "未能生成有效回答。"
+
+        if session_id and memory_config.get("enable_short_term", True) and memory is not None:
+            await asyncio.to_thread(memory.add_short_term_memory, session_id, "user", question)
+            await asyncio.to_thread(memory.add_short_term_memory, session_id, "assistant", answer)
+
+        return {"answer": answer, "tool_trace": tool_trace}

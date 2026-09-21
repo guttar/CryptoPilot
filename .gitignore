@@ -1,0 +1,70 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# ===== Virtual Environment =====
+.venv/
+venv/
+env/
+
+# ===== Environment & Secrets =====
+.env
+
+# ===== SQLite =====
+*.db
+*.sqlite3
+
+# ===== IDE / Editor =====
+.vscode/
+.idea/
+.claude/settings.local.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Docker =====
+docker-compose.override.yml
+
+# ===== Frontend =====
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== Data (raw & processed files) =====
+data/raw/
+data/processed/
+data/vectors/
+data/cache/
+data/reports/
+
+# ===== Celery =====
+celerybeat-schedule
+celerybeat.pid
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+*.ipynb
+
+# ===== Testing =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ===== MyPy =====
+.mypy_cache/
+
+# ===== OS Files =====
+Desktop.ini
