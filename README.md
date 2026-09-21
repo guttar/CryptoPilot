@@ -1,128 +1,117 @@
-# RAG-PDF-System
+# CryptoPilot
 
-一个面向个人与团队的知识管理平台，将 AI 笔记写作与企业级 RAG（检索增强生成）管线融合在统一的工作空间中。系统围绕「摄入 — 理解 — 创作 — 回顾」四个环节设计：
+面向密码学论文、协议规范和安全定义的可审计 Agentic RAG 系统。
 
-- **摄入**：支持 PDF、DOCX、XLSX、PPTX、Markdown、HTML、TXT 等多格式文档，经异步解析、分块、向量化后存入 Milvus 向量库
-- **理解**：基于通义千问 Qwen-Max 的 RAG 对话，支持单跳/多跳推理、重排序、来源引用，让 LLM 回答扎根于用户自有知识库
-- **创作**：内置 Tiptap 编辑器（富文本/Markdown），结合 AI 联机补全、写作助手（续写/扩写/摘要）和基于 RAG 的智能问答，辅助用户高效写作
-- **回顾**：采用 SM-2 间隔复习算法，通过卡片式复习对抗遗忘曲线，提升长期记忆效率
+CryptoPilot 将分散的密码学资料统一解析并写入知识库，由 Agent 根据问题自主选择知识检索、协议查询和参数校验工具，完成多步骤分析。每次执行都以持久化 Run/Event 记录，可通过 SSE 实时观察、断线续传、超时终止和主动取消。
 
-整个系统基于 FastAPI + Vue 3 + LangChain + Milvus + Qwen 构建，前后端分离，可通过 Docker Compose 一键部署。
+> 项目正在持续开发。README 中“已实现”的能力均已有对应代码；尚未完成的内容统一放在路线图中，不以规划冒充实现。
 
-## 功能概览
+## 核心能力
 
-| 模块 | 功能 |
-|------|------|
-| 笔记 | 富文本 / Markdown 编辑器 (Tiptap)，标签管理，自动保存 |
-| 间隔复习 | SM-2 遗忘曲线算法，卡片式复习，质量评分 (0-5) |
-| AI 联机补全 | 打字停顿后模型实时补全（1.5s 去抖），Tab 快速采纳 |
-| AI 写作助手 | 续写、扩写、摘要生成，SSE 流式输出，一键插入文档 |
-| 智能问答 | 基于 RAG 的 Agent 对话，关联知识库，文档引用来源展示 |
-| RAG 对话 | 单跳 / 多跳推理，会话管理，短期 + 长期记忆 |
-| 知识库 | 多格式文档上传，异步解析 → 分块 → 向量化 → 入库 |
-| 评估体系 | 自动生成 QA 数据集，LLM-as-Judge 评估，报告导出 |
-| 助手编排 | 可配置系统提示词、温度、Top-K，绑定知识库组合 |
+- **密码协议分析 Agent**：基于 LangGraph 实现有界的 Model → Tool → Model 循环，支持并行工具调用和最大步数保护。
+- **专业工具集**：提供知识库检索、协议速查和密码参数校验，可识别 RSA 短密钥、弱哈希、AEAD Nonce 重用等常见风险。
+- **RAG 知识库**：支持 PDF、DOCX、XLSX、PPTX、Markdown、HTML、TXT 等文档解析、切分、Embedding、Milvus 检索与 Rerank。
+- **可恢复执行**：Run、配置快照和递增 Event 持久化到 PostgreSQL；SSE 支持 `Last-Event-ID` 重放。
+- **异步与取消**：HTTP 请求不阻塞 Agent 长任务，支持执行超时和服务端真实取消，而不只是关闭浏览器连接。
+- **上下文记忆**：Redis 管理带 TTL 的短期会话窗口；PostgreSQL 保存业务事实和执行结果。
+- **可视化工作台**：Vue 3 页面支持 Agent 配置、直接运行、工具轨迹查看、结果展示和停止执行。
+- **容器化部署**：Docker Compose 编排 PostgreSQL、Redis、Milvus、MinIO、RabbitMQ、Celery Worker 和应用服务。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    UI[Vue 3 工作台] -->|REST / SSE| API[FastAPI]
+    API --> RUN[Agent Run Manager]
+    RUN --> GRAPH[LangGraph Agent]
+    GRAPH --> TOOLS{Tools}
+    TOOLS --> RETRIEVE[知识检索]
+    TOOLS --> PROTOCOL[协议查询]
+    TOOLS --> VALIDATE[参数校验]
+    RETRIEVE --> MILVUS[(Milvus)]
+    RETRIEVE --> RERANK[DashScope Rerank]
+    RUN --> PG[(PostgreSQL)]
+    RUN --> REDIS[(Redis)]
+    WORKER[Celery Worker] --> MILVUS
+    WORKER --> MINIO[(MinIO)]
+```
+
+职责边界：
+
+| 组件 | 职责 |
+|---|---|
+| PostgreSQL | 用户、知识库、Agent 配置、Run、Event 和最终结果 |
+| Redis | 短期记忆、运行状态缓存和 TTL 数据 |
+| Milvus | 文档向量及相似度检索 |
+| MinIO | 上传的原始文档 |
+| RabbitMQ / Celery | 文档解析、向量化等异步任务 |
 
 ## 技术栈
 
-| 组件 | 技术 |
+| 层级 | 技术 |
 |---|---|
-| 后端框架 | FastAPI (Python 3.10+) |
-| 前端 | Vue 3 + Element Plus + Pinia + Vite |
-| 富文本编辑器 | TipTap (ProseMirror) |
-| ORM | SQLAlchemy 2.x (SQLite 本地开发) |
-| 向量数据库 | Milvus 2.3.4 |
-| 嵌入模型 | DashScope text-embedding-v1 |
-| 大语言模型 | 通义千问 Qwen-Max |
-| 重排序 | DashScope gte-rerank |
-| 消息队列 | RabbitMQ 3 + Celery 5.x |
-| 缓存 / 记忆 | Redis 7 |
-| 对象存储 | MinIO |
-
-## 前置依赖
-
-- **Python 3.10+**
-- **Node.js 18+**
-- **Docker & Docker Compose**（用于启动基础服务）
-- **DashScope API Key** — 从 [阿里云 DashScope](https://dashscope.aliyun.com/) 获取
+| Agent | LangChain、LangGraph、Tool Calling |
+| Backend | Python 3.10+、FastAPI、SQLAlchemy、Pydantic |
+| Database | PostgreSQL 16、Redis 7 |
+| Retrieval | Milvus、DashScope Embedding、DashScope Rerank |
+| Async | asyncio、SSE、Celery、RabbitMQ |
+| Storage | MinIO |
+| Frontend | Vue 3、Element Plus、Pinia、Vite |
+| Deployment | Docker Compose |
 
 ## 快速启动
 
-### 1. 克隆项目
+### 1. 克隆与配置
 
 ```bash
-git clone https://github.com/xiebrown/RAGsystem.git
-cd RAGsystem
-```
-
-### 2. 配置环境变量
-
-```bash
+git clone https://github.com/guttar/CryptoPilot.git
+cd CryptoPilot
 cp .env.example .env
 ```
 
-编辑 `.env`，填入必要配置：
+在 `.env` 中至少填写：
 
 ```env
-# ===== 必填 =====
-SECRET_KEY=<随机字符串，可用 openssl rand -hex 32 生成>
-DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# ===== 基础服务（Docker 默认值，无需修改） =====
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
-REDIS_URL=redis://localhost:6379/0
-RABBITMQ_HOST=localhost
-RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
-RABBITMQ_PASSWORD=guest
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET_NAME=rag-documents
+SECRET_KEY=<随机且足够长的字符串>
+DASHSCOPE_API_KEY=<你的 DashScope API Key>
 ```
 
-### 3. 启动基础服务
+不要把真实 `.env`、API Key 或数据库密码提交到仓库。
+
+### 2. 启动基础设施
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-启动后确认各服务状态：
+默认包含 PostgreSQL、Redis、RabbitMQ、MinIO 和 Milvus。
 
-| 服务 | 端口 | 管理界面 |
-|---|---|---|
-| Milvus | 19530 | — |
-| MinIO | 9000 | http://localhost:9001 |
-| RabbitMQ | 5672 | http://localhost:15672 |
-| Redis | 6379 | — |
-| Flower (Celery 监控) | 5555 | http://localhost:5555 |
-
-### 4. 安装 Python 依赖
+### 3. 启动后端
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
 pip install -r requirements.txt
-```
-
-### 5. 启动后端
-
-```bash
 uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-后端启动后访问：
-- API 文档：http://localhost:8000/docs
-- 健康检查：http://localhost:8000/api/v1/health
+API 文档：<http://localhost:8000/docs>
 
-### 6. 启动 Celery Worker（可选，文档处理需要）
+### 4. 启动文档 Worker
 
 ```bash
-celery -A src.worker.celery_app worker --loglevel=info -P solo
+celery -A src.worker.celery_app worker --loglevel=info
 ```
 
-### 7. 启动前端
+Windows 本地开发可追加 `-P solo`。
+
+### 5. 启动前端
 
 ```bash
 cd frontend
@@ -130,147 +119,101 @@ npm install
 npm run dev
 ```
 
-前端开发服务器运行在 http://localhost:5173 ，API 请求自动代理到后端 8000 端口。
+前端地址：<http://localhost:5173>
 
----
+## Agent 执行接口
 
-## Docker 一键启动
+创建持久化运行：
+
+```http
+POST /api/v1/agents/{agent_id}/runs
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "question": "分析 TLS 1.3 密钥派生流程，并检查 RSA-1024 与 SHA-1 的风险"
+}
+```
+
+观察运行事件：
+
+```http
+GET /api/v1/agents/executions/{run_id}/stream
+Authorization: Bearer <token>
+Accept: text/event-stream
+Last-Event-ID: 3
+```
+
+取消运行：
+
+```http
+POST /api/v1/agents/executions/{run_id}/cancel
+Authorization: Bearer <token>
+```
+
+典型事件包括：
+
+```text
+run.started
+agent.thinking
+tool.started
+retrieval.started
+retrieval.completed
+tool.completed
+run.completed | run.failed | run.timed_out | run.cancelled
+```
+
+## 目录结构
+
+```text
+CryptoPilot/
+├── src/
+│   ├── api/routers/          # REST 与 SSE 接口
+│   ├── database/             # SQLAlchemy 模型、PostgreSQL 会话
+│   ├── embedding/            # Embedding 适配器
+│   ├── retrieval/            # Milvus 检索与 Rerank
+│   ├── services/
+│   │   ├── agent_service.py      # LangGraph Agent
+│   │   ├── agent_run_manager.py  # Run 生命周期、超时、取消、事件
+│   │   ├── crypto_tools.py       # 协议与参数安全工具
+│   │   ├── rag_service.py        # RAG 主流程
+│   │   └── memory_service.py     # Redis 会话记忆
+│   └── worker/               # Celery 文档处理任务
+├── frontend/                 # Vue 3 工作台
+├── docker/                   # Dockerfile 与 Compose
+├── tests/                    # 自动化测试
+└── docs/                     # API 文档
+```
+
+## 测试与构建
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build
+python -m unittest discover -s tests -v
+
+cd frontend
+npm run build
 ```
 
-这将同时启动所有 8 个服务：app (后端)、worker (Celery)、flower、rabbitmq、redis、etcd、minio、milvus-standalone。
+当前已覆盖密码协议别名、未知协议、RSA 弱密钥和 AEAD Nonce 重用等确定性工具测试；后续将持续补充 Agent、API、数据库与故障恢复测试。
 
-## 笔记功能详解
+## 路线图
 
-### 编辑器
-- **富文本模式**：Tiptap 工具栏（H1-H3、粗体、斜体、下划线、列表、引用、代码块、链接、图片）
-- **Markdown 模式**：一键切换
-- **自动保存**：3 秒去抖自动保存
+- [x] LangGraph 多步 Agent 与专业工具
+- [x] PostgreSQL Run/Event 持久化
+- [x] 可重放 SSE、超时和主动取消
+- [x] Redis 短期会话记忆
+- [x] Milvus 向量检索与 Rerank 基础链路
+- [ ] Dense + BM25 混合召回与 RRF 融合
+- [ ] 面向论文/协议/RFC 的结构化元数据抽取
+- [ ] 独立长期记忆集合与重要信息提炼
+- [ ] Agent Run 故障恢复和多 Worker 调度
+- [ ] 密码学评测集、引用正确率与安全结论评估
+- [ ] Alembic 迁移、CI 和生产安全加固
 
-### 间隔复习（遗忘曲线）
-采用 SM-2 算法，根据用户自评质量（0-5 分）动态计算下次复习间隔：
+## 安全说明
 
-| 评分 | 含义 | 结果 |
-|------|------|------|
-| 0 | 完全遗忘 | 重置间隔为 1 天 |
-| 1-2 | 记错但熟悉 | 重置间隔为 1 天 |
-| 3 | 回忆困难但正确 | 第 1 次 1 天，第 2 次 6 天，之后 × 难度系数 |
-| 4-5 | 顺利回忆 | 同上，但难度系数提升更多 |
+CryptoPilot 用于辅助研究和安全分析，不替代密码学专家评审、正式标准文本、合规审计或经过验证的密码库。参数校验工具只检查常见风险，不能证明一个协议或实现安全。
 
-### AI 联机补全
-- 编辑器输入停顿 **1.5 秒** 后自动触发
-- 灰色文字显示在光标位置
-- **Tab** 键采纳补全，**Esc** 键拒绝
+## License
 
-### AI 写作助手
-- **续写**：从当前内容自然延续
-- **扩写**：丰富细节和深度表达
-- **摘要**：生成简洁摘要
-- 全部通过 **SSE 流式** 逐 token 输出
-
-### 智能问答
-- 笔记可关联已有知识库
-- 基于 RAG 的 Agent 对话，自动引用来源文档
-- 引用来源可折叠展开，显示匹配度得分
-
-## 项目结构
-
-```
-RAGsystem/
-├── config/                   # 配置文件
-├── src/
-│   ├── main.py               # FastAPI 应用入口
-│   ├── settings.py           # 全局设置（.env 驱动）
-│   ├── api/
-│   │   ├── dependencies.py   # JWT 鉴权依赖
-│   │   └── routers/
-│   │       ├── auth.py       # 注册 / 登录
-│   │       ├── chat.py       # RAG 对话接口
-│   │       ├── notes.py      # 笔记 CRUD / 复习 / AI 补全 / 写作 / 问答
-│   │       ├── agent.py      # AI Agent 管理
-│   │       ├── assistant.py  # 助手编排
-│   │       ├── knowledge_base.py  # 知识库管理
-│   │       ├── evaluation.py # 评估体系
-│   │       ├── storage.py    # MinIO 文件管理
-│   │       ├── monitor.py    # 文档状态监控
-│   │       └── health.py     # 健康检查
-│   ├── database/
-│   │   ├── models.py         # SQLAlchemy 数据模型（含 Note / NoteReview / NoteTag...）
-│   │   ├── sql_session.py    # 数据库会话管理
-│   │   └── vector_db.py      # Milvus 向量库客户端
-│   ├── embedding/            # 嵌入服务
-│   ├── llm/                  # 大模型客户端
-│   ├── processors/           # 文档解析器（PDF/DOCX/XLSX/PPTX/MD/HTML）
-│   ├── retrieval/            # 检索 & 重排序
-│   ├── services/
-│   │   ├── rag_service.py    # RAG 主流程（单跳 / 多跳 / 流式）
-│   │   ├── note_service.py   # 笔记业务 + SM-2 算法 + AI 提示工程
-│   │   ├── memory_service.py # 短期 + 长期记忆
-│   │   └── evaluator.py      # RAG 评估
-│   ├── utils/                # 工具函数（JWT / 日志 / 预览）
-│   └── worker/               # Celery 任务
-│       ├── celery_app.py
-│       └── tasks.py
-├── frontend/
-│   └── src/
-│       ├── components/
-│       │   ├── TipTapEditor.vue       # 富文本/Markdown 编辑器
-│       │   ├── AICompletion.vue       # AI 联机补全覆盖层
-│       │   ├── AIWritingAssistant.vue # AI 写作助手侧面板
-│       │   └── SmartQA.vue           # 智能问答面板
-│       ├── views/
-│       │   ├── NotesList.vue          # 笔记列表/搜索/筛选
-│       │   ├── NoteEditor.vue         # 笔记编辑（编辑器+AI面板）
-│       │   └── NoteReview.vue         # 间隔复习卡片
-│       │   ├── Chat.vue / Assistant.vue / KnowledgeBase.vue / ...
-│       ├── store/
-│       │   └── notes.js              # Pinia 笔记状态管理
-│       └── router/index.js
-├── docker/                   # Docker 部署配置
-├── scripts/                  # 评估 & 工具脚本
-├── docs/                     # 文档
-├── .env.example              # 环境变量模板
-├── .env                      # 本地环境变量（不入库）
-├── .gitignore
-└── requirements.txt
-```
-
-## API 概览
-
-所有 API 前缀：`/api/v1`
-
-### 笔记
-| 方法 | 路由 | 说明 |
-|------|------|------|
-| GET | `/notes/` | 笔记列表（分页、搜索、标签筛选） |
-| POST | `/notes/` | 创建笔记 |
-| GET | `/notes/{id}` | 笔记详情（含复习状态） |
-| PUT | `/notes/{id}` | 更新笔记 |
-| DELETE | `/notes/{id}` | 删除笔记 |
-| GET | `/notes/{id}/review-status` | 间隔复习状态 |
-| POST | `/notes/{id}/review` | 提交复习评分（SM-2） |
-| GET | `/notes/review/due` | 到期笔记列表 |
-| POST | `/notes/ai/complete` | AI 联机补全 |
-| POST | `/notes/ai/write` | AI 写作助手（SSE 流式） |
-| POST | `/notes/{id}/chat` | 智能问答（SSE 流式 + 来源引用） |
-| GET/POST | `/notes/tags/list`, `/notes/tags` | 标签管理 |
-
-### 系统
-| 方法 | 路由 | 说明 |
-|------|------|------|
-| POST | `/auth/register` | 用户注册 |
-| POST | `/auth/login/access-token` | 登录获取 JWT |
-| GET | `/health` | 健康检查 |
-| CRUD | `/knowledge-bases` | 知识库管理 |
-| CRUD | `/assistants` | 助手编排 |
-| CRUD | `/agents` | AI Agent 管理 |
-| CRUD | `/evaluations` | 评估任务 |
-| POST | `/chat/` | RAG 对话（含流式） |
-
-完整文档访问 http://localhost:8000/docs
-
-## 许可证
-
-MIT
+[MIT](LICENSE)
