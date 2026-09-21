@@ -3,22 +3,20 @@ import json
 from typing import List, Dict, Any, Optional
 from src.settings import settings
 from src.utils.logger import logger
-from src.database.vector_db import MilvusClient
+from src.services.long_term_memory_service import LongTermMemoryService
 
 class MemorySystem:
     def __init__(self):
         self.redis_client = redis.from_url(settings.REDIS_URL)
-        # Keep Milvus lazy so short-term chat survives vector-store startup or
-        # temporary outages.
-        self._milvus_client = None
+        self._long_term_service = None
         self.ttl = settings.SHORT_TERM_MEMORY_TTL
         self.history_limit = settings.MEMORY_HISTORY_LIMIT
 
     @property
-    def milvus_client(self):
-        if self._milvus_client is None:
-            self._milvus_client = MilvusClient()
-        return self._milvus_client
+    def long_term_service(self):
+        if self._long_term_service is None:
+            self._long_term_service = LongTermMemoryService()
+        return self._long_term_service
 
     # --- Short Term Memory (Redis) ---
     
@@ -67,12 +65,15 @@ class MemorySystem:
     # Note: This is a simplified version using the existing Milvus setup
     # In a full implementation, we might want a separate collection for "insights"
 
-    def add_long_term_memory(self, user_id: str, insight: str, vector: List[float]):
-        """Store important insights in Milvus for long-term retrieval."""
-        # For now, we'll reuse the rag_documents collection or a similar structure
-        # In a real system, you'd have a 'memory' collection
-        pass
+    def add_long_term_memory(self, user_id: int, insight: str, memory_type: str = "insight"):
+        """Store a non-secret insight in the isolated long-term memory collection."""
+        return self.long_term_service.add(
+            user_id=user_id,
+            content=insight,
+            memory_type=memory_type,
+            metadata={"source": "memory_system"},
+        )
 
-    def retrieve_long_term_memory(self, query_vector: List[float], top_k: int = 3) -> List[Dict[str, Any]]:
-        """Retrieve relevant long-term memories based on vector similarity."""
-        return self.milvus_client.search(query_vector, top_k=top_k)
+    def retrieve_long_term_memory(self, user_id: int, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Retrieve only memories belonging to the requesting user."""
+        return self.long_term_service.recall(user_id=user_id, query=query, top_k=top_k)

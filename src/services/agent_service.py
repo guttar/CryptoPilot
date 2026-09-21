@@ -15,6 +15,7 @@ from src.llm.llm_client import LLMClient
 from src.services.crypto_tools import lookup_protocol as lookup_protocol_record
 from src.services.crypto_tools import validate_crypto_parameters as validate_crypto_parameters_record
 from src.services.knowledge_search_service import KnowledgeSearchService
+from src.services.long_term_memory_service import LongTermMemoryService
 from src.services.memory_service import MemorySystem
 
 
@@ -54,6 +55,7 @@ class AgentService:
         "lookup_protocol",
         "validate_crypto_parameters",
     ]
+    MEMORY_TOOLS = ["recall_long_term_memory", "remember_insight"]
 
     def __init__(
         self,
@@ -61,30 +63,34 @@ class AgentService:
         memory: MemorySystem | None = None,
         retriever_factory: Callable[[], Any] | None = None,
         reranker_factory: Callable[[], Any] | None = None,
+        long_term_memory: LongTermMemoryService | None = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.memory = memory
         self.retriever_factory = retriever_factory
         self.reranker_factory = reranker_factory
+        self.long_term_memory = long_term_memory
 
     @staticmethod
     async def _noop_event(_: str, __: Dict[str, Any]) -> None:
         return None
 
-    def _enabled_tool_names(self, config: Dict[str, Any]) -> List[str]:
+    def _enabled_tool_names(self, config: Dict[str, Any], available_names: set[str]) -> List[str]:
         configured = config.get("tools_config") or {}
         names = configured.get("enabled_tools")
         if names is None:
             names = configured.get("tools")
         if not names:
             names = list(self.DEFAULT_TOOLS)
+            if (config.get("memory_config") or {}).get("enable_long_term"):
+                names.extend(name for name in self.MEMORY_TOOLS if name in available_names)
         if not isinstance(names, list):
             raise ValueError("tools_config.tools must be a list")
 
         normalized = []
         for raw_name in names:
             name = self.TOOL_ALIASES.get(str(raw_name), str(raw_name))
-            if name not in self.DEFAULT_TOOLS:
+            if name not in available_names:
                 raise ValueError(f"Agent configuration contains an unsupported tool: {raw_name}")
             if name not in normalized:
                 normalized.append(name)
@@ -96,8 +102,10 @@ class AgentService:
         emit: EventCallback,
         tool_trace: List[Dict[str, Any]],
         cancel_event: asyncio.Event,
+        user_id: int | None,
     ) -> Dict[str, Any]:
         knowledge_config = config.get("knowledge_config") or {}
+        memory_config = config.get("memory_config") or {}
         kb_ids = [int(value) for value in knowledge_config.get("kb_ids", [])]
         configured_top_k = min(max(int(knowledge_config.get("top_k", 5)), 1), 20)
 
@@ -148,12 +156,38 @@ class AgentService:
                 nonce_reuse_possible=nonce_reuse_possible,
             )
 
+        @tool("recall_long_term_memory")
+        async def recall_long_term_memory(query: str, top_k: int = 3) -> Dict[str, Any]:
+            """Recall durable user-specific preferences and prior analysis insights relevant to a query."""
+            if not memory_config.get("enable_long_term") or user_id is None:
+                return {"memories": [], "message": "Long-term memory is disabled."}
+            service = self.long_term_memory or LongTermMemoryService()
+            memories = await asyncio.to_thread(service.recall, user_id=user_id, query=query, top_k=top_k)
+            return {"memories": memories}
+
+        @tool("remember_insight")
+        async def remember_insight(content: str, memory_type: str = "insight") -> Dict[str, Any]:
+            """Persist a non-secret, durable user preference or confirmed analysis insight for future runs."""
+            if not memory_config.get("enable_long_term") or user_id is None:
+                return {"stored": False, "message": "Long-term memory is disabled."}
+            service = self.long_term_memory or LongTermMemoryService()
+            return await asyncio.to_thread(
+                service.add,
+                user_id=user_id,
+                content=content,
+                memory_type=memory_type,
+                metadata={"source": "agent_tool"},
+            )
+
         registry = {
             search_knowledge_base.name: search_knowledge_base,
             lookup_protocol.name: lookup_protocol,
             validate_crypto_parameters.name: validate_crypto_parameters,
         }
-        return {name: registry[name] for name in self._enabled_tool_names(config)}
+        if memory_config.get("enable_long_term") and user_id is not None:
+            registry[recall_long_term_memory.name] = recall_long_term_memory
+            registry[remember_insight.name] = remember_insight
+        return {name: registry[name] for name in self._enabled_tool_names(config, set(registry))}
 
     async def run(
         self,
@@ -161,6 +195,7 @@ class AgentService:
         config: Dict[str, Any],
         *,
         session_id: str | None = None,
+        user_id: int | None = None,
         emit: EventCallback | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> Dict[str, Any]:
@@ -172,7 +207,7 @@ class AgentService:
         emit = emit or self._noop_event
         cancel_event = cancel_event or asyncio.Event()
         tool_trace: List[Dict[str, Any]] = []
-        tools = self._build_tools(config, emit, tool_trace, cancel_event)
+        tools = self._build_tools(config, emit, tool_trace, cancel_event, user_id)
         base_model = self.llm_client.llm
         model = base_model.bind_tools(list(tools.values())) if tools else base_model
         max_steps = min(max(int((config.get("reasoning_config") or {}).get("max_steps", 6)), 1), 12)
@@ -261,6 +296,19 @@ class AgentService:
             )
 
         history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history)
+        durable_memories: List[Dict[str, Any]] = []
+        if user_id is not None and memory_config.get("enable_long_term"):
+            try:
+                service = self.long_term_memory or LongTermMemoryService()
+                durable_memories = await asyncio.to_thread(
+                    service.recall,
+                    user_id=user_id,
+                    query=question,
+                    top_k=min(max(int(memory_config.get("long_term_top_k", 3)), 1), 10),
+                )
+                await emit("memory.recalled", {"count": len(durable_memories)})
+            except Exception as exc:
+                await emit("memory.failed", {"message": str(exc)})
         system_prompt = config.get("system_prompt") or (
             "你是密码协议辅助分析 Agent。优先使用绑定知识库中的论文、标准和安全定义作为证据；"
             "涉及算法参数时调用参数校验工具；区分标准事实、检索证据和你的推断；"
@@ -269,6 +317,17 @@ class AgentService:
         )
         if history_text:
             system_prompt += f"\n\n最近会话上下文：\n{history_text}"
+        if durable_memories:
+            memory_text = "\n".join(
+                f"- ({item.get('memory_type', 'insight')}) {item.get('text', '')}"
+                for item in durable_memories
+            )
+            system_prompt += (
+                "\n\n与当前问题相关的长期记忆（仅作上下文，不作为外部事实证据）：\n"
+                f"{memory_text}"
+            )
+        if memory_config.get("enable_long_term"):
+            system_prompt += "\n仅在内容是稳定偏好或已确认结论且不含凭据、私钥或其他秘密时，才可调用 remember_insight。"
 
         await emit("run.started", {"enabled_tools": list(tools), "max_steps": max_steps})
         result = await runnable.ainvoke(

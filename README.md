@@ -13,7 +13,7 @@ CryptoPilot 将分散的密码学资料统一解析并写入知识库，由 Agen
 - **RAG 知识库**：支持 PDF、DOCX、XLSX、PPTX、Markdown、HTML、TXT 等文档解析、切分、Embedding、Milvus 检索与 Rerank。
 - **可恢复执行**：Run、配置快照和递增 Event 持久化到 PostgreSQL；SSE 支持 `Last-Event-ID` 重放。
 - **异步与取消**：HTTP 请求不阻塞 Agent 长任务，支持执行超时和服务端真实取消，而不只是关闭浏览器连接。
-- **上下文记忆**：Redis 管理带 TTL 的短期会话窗口；PostgreSQL 保存业务事实和执行结果。
+- **上下文记忆**：Redis 管理带 TTL 的短期窗口；独立 Milvus Collection 保存按用户隔离的长期记忆，并拒绝疑似密钥和凭据。
 - **可视化工作台**：Vue 3 页面支持 Agent 配置、直接运行、工具轨迹查看、结果展示和停止执行。
 - **容器化部署**：Docker Compose 编排 PostgreSQL、Redis、Milvus、MinIO、RabbitMQ、Celery Worker 和应用服务。
 
@@ -42,7 +42,7 @@ flowchart LR
 |---|---|
 | PostgreSQL | 用户、知识库、Agent 配置、Run、Event 和最终结果 |
 | Redis | 短期记忆、运行状态缓存和 TTL 数据 |
-| Milvus | 文档向量及相似度检索 |
+| Milvus | 文档向量检索，以及与文档集合隔离的用户长期记忆 |
 | MinIO | 上传的原始文档 |
 | RabbitMQ / Celery | 文档解析、向量化等异步任务 |
 
@@ -194,7 +194,7 @@ cd frontend
 npm run build
 ```
 
-当前已覆盖密码协议别名、未知协议、RSA 弱密钥和 AEAD Nonce 重用等确定性工具测试；后续将持续补充 Agent、API、数据库与故障恢复测试。
+当前已覆盖密码协议别名、未知协议、RSA 弱密钥、AEAD Nonce 重用、RAG 引用、用户记忆隔离和秘密信息拒绝等测试；后续将持续补充 Agent、API、数据库与故障恢复测试。
 
 ## 路线图
 
@@ -205,7 +205,7 @@ npm run build
 - [x] Milvus 向量检索与 Rerank 基础链路
 - [ ] Dense + BM25 混合召回与 RRF 融合
 - [ ] 面向论文/协议/RFC 的结构化元数据抽取
-- [ ] 独立长期记忆集合与重要信息提炼
+- [x] 用户隔离的长期记忆集合、语义召回与秘密信息保护
 - [ ] Agent Run 故障恢复和多 Worker 调度
 - [ ] 密码学评测集、引用正确率与安全结论评估
 - [ ] Alembic 迁移、CI 和生产安全加固

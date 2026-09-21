@@ -280,7 +280,11 @@ async def run_agent(
             settings.AGENT_MAX_TIMEOUT_SECONDS,
         )
         async with asyncio.timeout(timeout_seconds):
-            return await AgentService().run(request.question, _agent_config(agent))
+            return await AgentService().run(
+                request.question,
+                _agent_config(agent),
+                user_id=current_user.id,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except asyncio.TimeoutError as exc:

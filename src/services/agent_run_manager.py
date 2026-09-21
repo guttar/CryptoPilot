@@ -113,6 +113,7 @@ class AgentRunManager:
             return {
                 "question": run.question,
                 "config": run.config_snapshot or {},
+                "user_id": run.user_id,
             }
 
     async def _execute(self, run_id: str, cancel_event: asyncio.Event) -> None:
@@ -135,6 +136,7 @@ class AgentRunManager:
                     record["question"],
                     record["config"],
                     session_id=f"agent:{run_id}",
+                    user_id=record["user_id"],
                     emit=emit,
                     cancel_event=cancel_event,
                 )

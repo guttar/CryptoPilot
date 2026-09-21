@@ -113,6 +113,9 @@
              <el-form-item label="长期记忆">
               <el-switch v-model="form.memory_config.enable_long_term" active-text="开启" inactive-text="关闭" />
             </el-form-item>
+            <el-form-item label="长期记忆 Top K" v-if="form.memory_config.enable_long_term">
+              <el-input-number v-model="form.memory_config.long_term_top_k" :min="1" :max="10" />
+            </el-form-item>
           </el-form>
         </el-tab-pane>
 
@@ -267,7 +270,13 @@ const currentId = ref(null)
 const activeTab = ref('basic')
 
 // Constant Options
-const availableTools = ['search_knowledge_base', 'lookup_protocol', 'validate_crypto_parameters']
+const availableTools = [
+  'search_knowledge_base',
+  'lookup_protocol',
+  'validate_crypto_parameters',
+  'recall_long_term_memory',
+  'remember_insight',
+]
 const availablePermissions = ['read_file', 'write_file', 'internet_access', 'execute_code']
 
 const runDialogVisible = ref(false)
@@ -306,7 +315,8 @@ const form = reactive({
   memory_config: {
     enable_short_term: true,
     window_size: 10,
-    enable_long_term: false
+    enable_long_term: false,
+    long_term_top_k: 3
   },
   reasoning_config: {
     max_steps: 10,
@@ -385,7 +395,7 @@ const openDialog = (row = null) => {
     // Load config fields, providing defaults if null
     form.tools_config = row.tools_config || { tools: [], permissions: [] }
     form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', top_k: 5, enable_rerank: true, ...(row.knowledge_config || {}) }
-    form.memory_config = row.memory_config || { enable_short_term: true, window_size: 10, enable_long_term: false }
+    form.memory_config = { enable_short_term: true, window_size: 10, enable_long_term: false, long_term_top_k: 3, ...(row.memory_config || {}) }
     form.reasoning_config = row.reasoning_config || { max_steps: 10, allow_parallel: true }
     form.security_config = row.security_config || { safety_level: 'moderate', allowed_actions: [], allow_internet: false }
     form.interaction_config = row.interaction_config || { output_format: 'markdown', response_style: 'professional', clarify_enabled: true }
@@ -404,7 +414,7 @@ const openDialog = (row = null) => {
     
     form.tools_config = { tools: [], permissions: [] }
     form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', top_k: 5, enable_rerank: true }
-    form.memory_config = { enable_short_term: true, window_size: 10, enable_long_term: false }
+    form.memory_config = { enable_short_term: true, window_size: 10, enable_long_term: false, long_term_top_k: 3 }
     form.reasoning_config = { max_steps: 10, allow_parallel: true }
     form.security_config = { safety_level: 'moderate', allowed_actions: [], allow_internet: false }
     form.interaction_config = { output_format: 'markdown', response_style: 'professional', clarify_enabled: true }
