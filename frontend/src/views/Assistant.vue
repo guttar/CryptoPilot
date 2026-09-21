@@ -73,10 +73,16 @@
                     <el-slider v-model="form.rag_config.top_k" :min="1" :max="20" show-input />
                 </el-form-item>
 
-                <el-form-item label="混合权重">
-                    <el-tooltip content="待后续版本实现 (0.0 - 1.0)" placement="top">
-                        <el-slider v-model="form.rag_config.hybrid_weight" :min="0" :max="1" :step="0.1" show-input />
-                    </el-tooltip>
+                <el-form-item label="召回策略">
+                    <el-radio-group v-model="form.rag_config.recall_strategy">
+                        <el-radio label="vector">向量</el-radio>
+                        <el-radio label="keyword">关键词</el-radio>
+                        <el-radio label="hybrid">混合</el-radio>
+                    </el-radio-group>
+                </el-form-item>
+
+                <el-form-item label="语义检索权重" v-if="form.rag_config.recall_strategy === 'hybrid'">
+                    <el-slider v-model="form.rag_config.hybrid_weight" :min="0" :max="1" :step="0.1" show-input />
                 </el-form-item>
 
                 <el-form-item label="启用重排序">
@@ -177,7 +183,15 @@
                                         <el-slider v-model="form.rag_config.top_k" :min="1" :max="20" show-input />
                                     </el-form-item>
 
-                                    <el-form-item label="混合权重">
+                                    <el-form-item label="召回策略">
+                                        <el-radio-group v-model="form.rag_config.recall_strategy">
+                                            <el-radio label="vector">向量</el-radio>
+                                            <el-radio label="keyword">关键词</el-radio>
+                                            <el-radio label="hybrid">混合</el-radio>
+                                        </el-radio-group>
+                                    </el-form-item>
+
+                                    <el-form-item label="语义检索权重" v-if="form.rag_config.recall_strategy === 'hybrid'">
                                         <el-slider v-model="form.rag_config.hybrid_weight" :min="0" :max="1" :step="0.1" show-input />
                                     </el-form-item>
 
@@ -290,6 +304,7 @@ const form = reactive({
   },
   rag_config: {
       top_k: 5,
+      recall_strategy: 'hybrid',
       hybrid_weight: 0.5,
       enable_rerank: false,
       rerank_top_n: 5
@@ -388,13 +403,13 @@ const startChat = async (row) => {
 
     // Populate form for Info Panel
     const data = JSON.parse(JSON.stringify(row))
-    if (!data.rag_config) {
-        data.rag_config = {
-            top_k: 5,
-            hybrid_weight: 0.5,
-            enable_rerank: false,
-            rerank_top_n: 5
-        }
+    data.rag_config = {
+        top_k: 5,
+        recall_strategy: 'hybrid',
+        hybrid_weight: 0.5,
+        enable_rerank: false,
+        rerank_top_n: 5,
+        ...(data.rag_config || {})
     }
     if (!data.memory_config) {
         data.memory_config = {
@@ -584,13 +599,13 @@ const openDialog = (row = null) => {
     currentId.value = row.id
     // Deep copy to avoid reference issues, and handle missing rag_config
     const data = JSON.parse(JSON.stringify(row))
-    if (!data.rag_config) {
-        data.rag_config = {
-            top_k: 5,
-            hybrid_weight: 0.5,
-            enable_rerank: false,
-            rerank_top_n: 5
-        }
+    data.rag_config = {
+        top_k: 5,
+        recall_strategy: 'hybrid',
+        hybrid_weight: 0.5,
+        enable_rerank: false,
+        rerank_top_n: 5,
+        ...(data.rag_config || {})
     }
     Object.assign(form, data)
   } else {
@@ -607,6 +622,7 @@ const openDialog = (row = null) => {
       agent_ids: [],
       rag_config: {
           top_k: 5,
+          recall_strategy: 'hybrid',
           hybrid_weight: 0.5,
           enable_rerank: false,
           rerank_top_n: 5

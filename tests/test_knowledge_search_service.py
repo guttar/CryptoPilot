@@ -5,8 +5,8 @@ from src.services.knowledge_search_service import KnowledgeSearchService
 
 
 class FakeRetriever:
-    def retrieve(self, query, top_k, kb_id, kb_ids):
-        self.call = {"query": query, "top_k": top_k, "kb_id": kb_id, "kb_ids": kb_ids}
+    def retrieve(self, query, top_k, kb_id, kb_ids, **options):
+        self.call = {"query": query, "top_k": top_k, "kb_id": kb_id, "kb_ids": kb_ids, **options}
         return [
             SimpleNamespace(
                 id="chunk-1",
@@ -46,6 +46,7 @@ class KnowledgeSearchTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(retriever.call["kb_ids"], [3])
+        self.assertEqual(retriever.call["strategy"], "hybrid")
         self.assertEqual(result["citations"][0]["citation_id"], "KB1")
         self.assertEqual(result["citations"][0]["source"], "rfc8446.pdf")
         self.assertEqual(result["metrics"]["filtered_count"], 1)

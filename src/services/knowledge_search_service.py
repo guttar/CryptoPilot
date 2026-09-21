@@ -33,9 +33,9 @@ class KnowledgeSearchService:
     async def _retriever(self):
         if self.retriever_factory is not None:
             return self.retriever_factory()
-        from src.retrieval.vector_retriever import VectorRetriever
+        from src.retrieval.hybrid_retriever import HybridRetriever
 
-        return await asyncio.to_thread(VectorRetriever)
+        return await asyncio.to_thread(HybridRetriever)
 
     def _reranker(self):
         if self.reranker_factory is not None:
@@ -81,6 +81,8 @@ class KnowledgeSearchService:
         kb_ids: Iterable[int],
         top_k: int,
         enable_rerank: bool = True,
+        recall_strategy: str = "hybrid",
+        dense_weight: float = 0.5,
         metadata_filters: Dict[str, Any] | None = None,
         emit: EventCallback | None = None,
     ) -> Dict[str, Any]:
@@ -96,11 +98,22 @@ class KnowledgeSearchService:
             raise ValueError(f"Unsupported metadata filters: {', '.join(sorted(unsupported))}")
 
         limit = min(max(int(top_k), 1), 20)
+        strategy = str(recall_strategy or "hybrid").casefold()
+        if strategy not in {"vector", "keyword", "hybrid"}:
+            raise ValueError("recall_strategy must be vector, keyword, or hybrid")
+        normalized_dense_weight = min(max(float(dense_weight), 0.0), 1.0)
         candidate_k = min(max(limit * 3, limit), 60)
         if emit:
             await emit(
                 "retrieval.started",
-                {"query": query, "kb_ids": normalized_kb_ids, "candidate_k": candidate_k, "filters": filters},
+                {
+                    "query": query,
+                    "kb_ids": normalized_kb_ids,
+                    "candidate_k": candidate_k,
+                    "filters": filters,
+                    "recall_strategy": strategy,
+                    "dense_weight": normalized_dense_weight,
+                },
             )
 
         started = time.perf_counter()
@@ -111,6 +124,8 @@ class KnowledgeSearchService:
             candidate_k,
             None,
             normalized_kb_ids,
+            strategy=strategy,
+            dense_weight=normalized_dense_weight,
         )
         filtered = [item for item in candidates if self._matches_filters(item, filters)]
         filtered_count = len(filtered)
@@ -134,6 +149,8 @@ class KnowledgeSearchService:
             "returned_count": len(citations),
             "rerank_applied": rerank_applied,
             "rerank_fallback": rerank_fallback,
+            "recall_strategy": strategy,
+            "dense_weight": normalized_dense_weight,
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
         if emit:

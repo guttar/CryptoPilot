@@ -130,6 +130,8 @@ class AgentService:
                 kb_ids=kb_ids,
                 top_k=limit,
                 enable_rerank=knowledge_config.get("enable_rerank", True),
+                recall_strategy=knowledge_config.get("recall_strategy", "hybrid"),
+                dense_weight=knowledge_config.get("dense_weight", 0.5),
                 metadata_filters=metadata_filters,
                 emit=emit,
             )

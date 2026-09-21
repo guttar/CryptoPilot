@@ -95,6 +95,14 @@ def _resolve_assistant_config(
     return config, valid_kb_ids
 
 
+def _effective_top_k(assistant_config: dict, fallback: int) -> int:
+    try:
+        value = int((assistant_config.get("rag_config") or {}).get("top_k", fallback))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="rag_config.top_k must be an integer") from exc
+    return min(max(value, 1), 20)
+
+
 class ChatRequest(BaseModel):
     """聊天请求数据模型"""
     query: str
@@ -170,6 +178,7 @@ async def chat(
     assistant_config, valid_kb_ids = _resolve_assistant_config(
         assistant, request.kb_id, current_user.id, db
     )
+    effective_top_k = _effective_top_k(assistant_config, request.top_k)
     
     # 管理会话：创建新会话或复用现有会话
     session_uid = request.session_id
@@ -212,7 +221,7 @@ async def chat(
         result = await asyncio.to_thread(
             rag_service.query,
             query_text=request.query,
-            top_k=request.top_k,
+            top_k=effective_top_k,
             session_id=session_uid,
             kb_ids=valid_kb_ids,
             assistant_config=assistant_config,
@@ -263,6 +272,7 @@ async def chat_stream(
     assistant_config, valid_kb_ids = _resolve_assistant_config(
         assistant, request.kb_id, current_user.id, db
     )
+    effective_top_k = _effective_top_k(assistant_config, request.top_k)
 
     # 管理会话
     session_uid = request.session_id
@@ -337,7 +347,7 @@ async def chat_stream(
             else:
                 async for event in rag_service.query_stream(
                     query_text=request.query,
-                    top_k=request.top_k,
+                    top_k=effective_top_k,
                     session_id=session_uid,
                     kb_ids=valid_kb_ids,
                     assistant_config=assistant_config,

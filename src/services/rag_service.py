@@ -1,5 +1,5 @@
 from typing import AsyncIterator, List, Dict, Any, Optional
-from src.retrieval.vector_retriever import VectorRetriever
+from src.retrieval.hybrid_retriever import HybridRetriever
 from src.retrieval.reranker import DashScopeReranker
 from src.llm.llm_client import LLMClient
 from src.utils.logger import logger
@@ -21,7 +21,7 @@ class RAGService:
         
         初始化向量检索器、LLM客户端、重排序器、问题分析器和记忆系统等核心组件。
         """
-        self.retriever = VectorRetriever()
+        self.retriever = HybridRetriever()
         self.llm_client = LLMClient()
         self.reranker = DashScopeReranker()
         self.analyzer = QuestionAnalyzer(self.llm_client)
@@ -64,7 +64,13 @@ class RAGService:
         
         # 配置提取
         system_prompt = assistant_config.get("system_prompt") if assistant_config else None
-        agent_ids = assistant_config.get("agent_ids") if assistant_config else None
+        rag_config = (assistant_config or {}).get("rag_config") or {}
+        retrieval_options = {
+            "strategy": rag_config.get("recall_strategy", "hybrid"),
+            "dense_weight": rag_config.get("hybrid_weight", 0.5),
+        }
+        enable_rerank = settings.ENABLE_RERANK and bool(rag_config.get("enable_rerank", True))
+        rerank_top_n = min(max(int(rag_config.get("rerank_top_n", top_k)), 1), top_k)
         # model = assistant_config.get("llm_model") # 如果LLM客户端支持则传递
         
         # 0. 获取历史对话（短期记忆）
@@ -102,10 +108,6 @@ class RAGService:
             if system_prompt:
                 context = f"系统指令: {system_prompt}\n\n{context}"
                 
-            # TODO: 如果存在agent_ids，可以在此处调用AgentExecutor
-            if agent_ids:
-                logger.info(f"Agents configured: {agent_ids}. Agent execution logic to be implemented.")
-                
             # 直接调用LLM
             # 对非RAG查询使用通用响应方法
             answer = self.llm_client.generate_general_response(query_text, context)
@@ -126,9 +128,15 @@ class RAGService:
         logger.info(f"Question Analysis: {analysis}")
 
         if settings.ENABLE_MULTI_HOP and analysis.get("is_multi_hop"):
-            result = self._multi_hop_query(query_text, analysis.get("sub_queries", []), top_k, history_str, kb_ids, system_prompt)
+            result = self._multi_hop_query(
+                query_text, analysis.get("sub_queries", []), top_k, history_str,
+                kb_ids, system_prompt, retrieval_options, enable_rerank, rerank_top_n
+            )
         else:
-            result = self._single_hop_query(query_text, top_k, history_str, kb_ids, system_prompt)
+            result = self._single_hop_query(
+                query_text, top_k, history_str, kb_ids, system_prompt,
+                retrieval_options, enable_rerank, rerank_top_n
+            )
         
         # 2. 更新短期记忆
         self.memory.add_short_term_memory(session_id, "user", query_text)
@@ -156,6 +164,13 @@ class RAGService:
             - {"type": "done"} — 流结束
         """
         system_prompt = assistant_config.get("system_prompt") if assistant_config else None
+        rag_config = (assistant_config or {}).get("rag_config") or {}
+        retrieval_options = {
+            "strategy": rag_config.get("recall_strategy", "hybrid"),
+            "dense_weight": rag_config.get("hybrid_weight", 0.5),
+        }
+        enable_rerank = settings.ENABLE_RERANK and bool(rag_config.get("enable_rerank", True))
+        rerank_top_n = min(max(int(rag_config.get("rerank_top_n", top_k)), 1), top_k)
         memory_config = assistant_config.get("memory_config", {}) if assistant_config else {}
         enable_short_term = memory_config.get("enable_short_term", True)
 
@@ -176,11 +191,13 @@ class RAGService:
             return
 
         # RAG 模式：检索 → 重排序 → 流式生成
-        initial_k = top_k * 2 if settings.ENABLE_RERANK else top_k
-        search_results = self.retriever.retrieve(query_text, top_k=initial_k, kb_ids=kb_ids)
+        initial_k = top_k * 2 if enable_rerank else top_k
+        search_results = self.retriever.retrieve(
+            query_text, top_k=initial_k, kb_ids=kb_ids, **retrieval_options
+        )
 
-        if settings.ENABLE_RERANK and search_results:
-            search_results = self.reranker.rerank(query_text, search_results)
+        if enable_rerank and search_results:
+            search_results = self.reranker.rerank(query_text, search_results, rerank_top_n)
         else:
             search_results = search_results[:top_k]
 
@@ -226,7 +243,10 @@ class RAGService:
         top_k: int, 
         history_str: str = "", 
         kb_ids: Optional[List[int]] = None,
-        system_prompt: str = None
+        system_prompt: str = None,
+        retrieval_options: Optional[Dict[str, Any]] = None,
+        enable_rerank: bool = True,
+        rerank_top_n: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         执行单跳查询
@@ -249,14 +269,19 @@ class RAGService:
         """
         
         # 1. 检索
-        initial_k = top_k * 2 if settings.ENABLE_RERANK else top_k
+        initial_k = top_k * 2 if enable_rerank else top_k
         search_results = []
         if kb_ids:
-            search_results = self.retriever.retrieve(query_text, top_k=initial_k, kb_ids=kb_ids)
+            search_results = self.retriever.retrieve(
+                query_text,
+                top_k=initial_k,
+                kb_ids=kb_ids,
+                **(retrieval_options or {}),
+            )
         
         # 2. 重排序
-        if settings.ENABLE_RERANK and search_results:
-            search_results = self.reranker.rerank(query_text, search_results)
+        if enable_rerank and search_results:
+            search_results = self.reranker.rerank(query_text, search_results, rerank_top_n or top_k)
         else:
             search_results = search_results[:top_k]
         
@@ -309,7 +334,10 @@ class RAGService:
         top_k: int, 
         history_str: str = "", 
         kb_ids: Optional[List[int]] = None,
-        system_prompt: str = None
+        system_prompt: str = None,
+        retrieval_options: Optional[Dict[str, Any]] = None,
+        enable_rerank: bool = True,
+        rerank_top_n: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         执行多跳查询
@@ -343,7 +371,12 @@ class RAGService:
             
             # 为子查询执行检索
             if kb_ids:
-                results = self.retriever.retrieve(sub_query, top_k=top_k, kb_ids=kb_ids)
+                results = self.retriever.retrieve(
+                    sub_query,
+                    top_k=top_k,
+                    kb_ids=kb_ids,
+                    **(retrieval_options or {}),
+                )
                 
                 # 过滤唯一结果
                 new_results = [r for r in results if r.id not in [existing.id for existing in all_results]]
@@ -354,8 +387,8 @@ class RAGService:
                 accumulated_context += self._format_context(new_results)
 
         # 对所有收集的证据进行最终重排序
-        if settings.ENABLE_RERANK and all_results:
-            all_results = self.reranker.rerank(query_text, all_results)
+        if enable_rerank and all_results:
+            all_results = self.reranker.rerank(query_text, all_results, rerank_top_n or top_k)
         else:
             all_results = all_results[:top_k]
 

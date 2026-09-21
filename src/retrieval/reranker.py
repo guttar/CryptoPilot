@@ -19,7 +19,7 @@ class DashScopeReranker:
         self.model = settings.RERANK_MODEL
         self.top_n = settings.RERANK_TOP_N
 
-    def rerank(self, query: str, documents: List[SearchResult]) -> List[SearchResult]:
+    def rerank(self, query: str, documents: List[SearchResult], top_n: int = None) -> List[SearchResult]:
         """对检索结果进行重排序。
         
         调用DashScope的重排序API，根据查询文本与文档的相关性对文档列表进行重新排序。
@@ -36,10 +36,11 @@ class DashScopeReranker:
         # 处理空文档列表的边界情况
         if not documents:
             return []
+        limit = min(max(int(top_n or self.top_n), 1), len(documents))
             
         # 检查重排序功能是否启用，未启用时直接返回前top_n条结果
         if not settings.ENABLE_RERANK:
-            return documents[:self.top_n]
+            return documents[:limit]
 
         try:
             # 提取文档文本内容，准备调用DashScope API
@@ -52,7 +53,7 @@ class DashScopeReranker:
                 model=self.model,
                 query=query,
                 documents=doc_texts,
-                top_n=self.top_n,
+                top_n=limit,
                 api_key=self.api_key
             )
 
@@ -70,9 +71,9 @@ class DashScopeReranker:
             else:
                 # API调用失败，记录错误并返回原始结果作为降级方案
                 logger.error(f"DashScope Rerank Error: {resp.code} - {resp.message}")
-                return documents[:self.top_n]
+                return documents[:limit]
                 
         except Exception as e:
             # 捕获异常并记录日志，返回原始结果作为降级方案
             logger.error(f"Rerank failed: {e}")
-            return documents[:self.top_n]
+            return documents[:limit]

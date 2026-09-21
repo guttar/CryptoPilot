@@ -11,7 +11,7 @@ CryptoPilot 将分散的密码学资料统一解析并写入知识库，由 Agen
 - **密码协议分析 Agent**：基于 LangGraph 实现有界的 Model → Tool → Model 循环，支持并行工具调用和最大步数保护。
 - **Assistant 多 Agent 编排**：助手可绑定一个或多个用户自有 Agent；并发执行后汇总结论，通过聊天 SSE 返回工具与检索轨迹。
 - **专业工具集**：提供知识库检索、协议速查和密码参数校验，可识别 RSA 短密钥、弱哈希、AEAD Nonce 重用等常见风险。
-- **RAG 知识库**：支持 PDF、DOCX、XLSX、PPTX、Markdown、HTML、TXT 等文档解析、切分、Embedding、Milvus 检索与 Rerank。
+- **RAG 知识库**：支持 PDF、DOCX、XLSX、PPTX、Markdown、HTML、TXT 等文档解析、切分，以及 Milvus Dense + PostgreSQL BM25 的加权 RRF 混合召回与 Rerank。
 - **可恢复执行**：Run、配置快照和递增 Event 持久化到 PostgreSQL；SSE 支持 `Last-Event-ID` 重放。
 - **异步与取消**：HTTP 请求不阻塞 Agent 长任务，支持执行超时和服务端真实取消，而不只是关闭浏览器连接。
 - **上下文记忆**：Redis 管理带 TTL 的短期窗口；独立 Milvus Collection 保存按用户隔离的长期记忆，并拒绝疑似密钥和凭据。
@@ -31,7 +31,8 @@ flowchart LR
     TOOLS --> RETRIEVE[知识检索]
     TOOLS --> PROTOCOL[协议查询]
     TOOLS --> VALIDATE[参数校验]
-    RETRIEVE --> MILVUS[(Milvus)]
+    RETRIEVE --> MILVUS[(Milvus Dense)]
+    RETRIEVE --> BM25[PostgreSQL BM25]
     RETRIEVE --> RERANK[DashScope Rerank]
     RUN --> PG[(PostgreSQL)]
     RUN --> REDIS[(Redis)]
@@ -43,7 +44,7 @@ flowchart LR
 
 | 组件 | 职责 |
 |---|---|
-| PostgreSQL | 用户、知识库、Agent 配置、Run、Event 和最终结果 |
+| PostgreSQL | 用户、知识库、文档分块、BM25 候选、Agent 配置、Run、Event 和最终结果 |
 | Redis | 短期记忆、运行状态缓存和 TTL 数据 |
 | Milvus | 文档向量检索，以及与文档集合隔离的用户长期记忆 |
 | MinIO | 上传的原始文档 |
@@ -207,7 +208,7 @@ npm run build
 - [x] 可重放 SSE、超时和主动取消
 - [x] Redis 短期会话记忆
 - [x] Milvus 向量检索与 Rerank 基础链路
-- [ ] Dense + BM25 混合召回与 RRF 融合
+- [x] Dense + BM25 混合召回与加权 RRF 融合
 - [ ] 面向论文/协议/RFC 的结构化元数据抽取
 - [x] 用户隔离的长期记忆集合、语义召回与秘密信息保护
 - [x] Assistant 绑定 Agent 的真实执行、结果汇总与 SSE 轨迹
