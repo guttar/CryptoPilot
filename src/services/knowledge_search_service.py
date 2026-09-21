@@ -16,6 +16,12 @@ ALLOWED_METADATA_FILTERS = {
     "source",
     "page",
     "protocol",
+    "protocols",
+    "algorithms",
+    "security_topics",
+    "document_type",
+    "standard_org",
+    "rfc_number",
     "year",
     "category",
 }
@@ -48,9 +54,15 @@ class KnowledgeSearchService:
     def _matches_filters(result: Any, filters: Dict[str, Any]) -> bool:
         metadata = result.metadata or {}
         for key, expected in filters.items():
-            actual = metadata.get(key)
-            if isinstance(expected, list):
-                if actual not in expected:
+            actual = metadata.get("page_num", metadata.get("page")) if key == "page" else metadata.get(key)
+            if isinstance(actual, list):
+                expected_values = expected if isinstance(expected, list) else [expected]
+                if not {str(value).casefold() for value in actual}.intersection(
+                    str(value).casefold() for value in expected_values
+                ):
+                    return False
+            elif isinstance(expected, list):
+                if str(actual).casefold() not in {str(value).casefold() for value in expected}:
                     return False
             elif str(actual).casefold() != str(expected).casefold():
                 return False
@@ -69,7 +81,11 @@ class KnowledgeSearchService:
             "doc_uid": metadata.get("doc_uid"),
             "metadata": {
                 key: metadata[key]
-                for key in ("protocol", "year", "category", "file_type")
+                for key in (
+                    "protocol", "protocols", "algorithms", "security_topics",
+                    "document_type", "standard_org", "rfc_number", "year",
+                    "category", "file_type",
+                )
                 if key in metadata
             },
         }

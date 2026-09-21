@@ -67,6 +67,15 @@ class KnowledgeSearchTests(unittest.IsolatedAsyncioTestCase):
         result = await service.search(query="test", kb_ids=[], top_k=5)
         self.assertEqual(result["citations"], [])
 
+    def test_list_metadata_filters_match_any_requested_value(self):
+        item = SimpleNamespace(metadata={"algorithms": ["HKDF", "AES-GCM"]})
+        self.assertTrue(
+            KnowledgeSearchService._matches_filters(item, {"algorithms": ["RSA", "HKDF"]})
+        )
+        self.assertFalse(
+            KnowledgeSearchService._matches_filters(item, {"algorithms": "SHA-1"})
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from src.processors.text_chunker import TextChunker
 from src.embedding import get_embedding_service
 from src.database.vector_db import MilvusClient
 from src.models.vector import VectorRecord
+from src.processors.metadata_extractor import MetadataExtractor
 from src.utils.logger import logger
 import os
 
@@ -87,6 +88,10 @@ def process_document_task(self, doc_id: int):
         chunker = TextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         # split_document returns List[Chunk] (Pydantic models)
         chunks = chunker.split_document(parsed_doc)
+        document_metadata = MetadataExtractor.extract(
+            (parsed_doc.content or "")[:200000],
+            filename=doc.filename,
+        )
         
         doc.chunk_count = len(chunks)
         db.commit()
@@ -145,6 +150,15 @@ def process_document_task(self, doc_id: int):
             metadata["kb_id"] = doc.kb_id
             metadata["filename"] = doc.filename
             metadata["file_type"] = doc.file_type
+            chunk_metadata = MetadataExtractor.extract(chunk.text, filename=doc.filename)
+            structured_metadata = dict(document_metadata)
+            structured_metadata["document_algorithms"] = document_metadata.get("algorithms", [])
+            structured_metadata["algorithms"] = chunk_metadata.get("algorithms", [])
+            structured_metadata["security_topics"] = chunk_metadata.get("security_topics", [])
+            if chunk_metadata.get("protocols"):
+                structured_metadata["protocols"] = chunk_metadata["protocols"]
+                structured_metadata["protocol"] = chunk_metadata["protocol"]
+            metadata.update(structured_metadata)
             metadata["text"] = chunk.text # Ensure text is available for retrieval
             
             vector_records.append(VectorRecord(

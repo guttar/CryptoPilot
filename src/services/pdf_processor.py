@@ -5,6 +5,7 @@ from src.embedding import get_embedding_service
 from src.database.vector_db import MilvusClient
 from src.models.document import Document
 from src.models.vector import VectorRecord
+from src.processors.metadata_extractor import MetadataExtractor
 from src.utils.logger import logger
 
 class PDFProcessorService:
@@ -41,11 +42,23 @@ class PDFProcessorService:
 
             # 4. Prepare Vector Records
             vector_records = []
+            document_metadata = MetadataExtractor.extract(
+                (document.content or "")[:200000],
+                filename=document.filename,
+            )
             for i, chunk in enumerate(chunks):
                 chunk.embedding = embeddings[i]
                 
                 # Prepare metadata for Milvus
                 metadata = chunk.metadata.model_dump()
+                chunk_metadata = MetadataExtractor.extract(chunk.text, filename=document.filename)
+                metadata.update(document_metadata)
+                metadata["document_algorithms"] = document_metadata.get("algorithms", [])
+                metadata["algorithms"] = chunk_metadata.get("algorithms", [])
+                metadata["security_topics"] = chunk_metadata.get("security_topics", [])
+                if chunk_metadata.get("protocols"):
+                    metadata["protocols"] = chunk_metadata["protocols"]
+                    metadata["protocol"] = chunk_metadata["protocol"]
                 metadata["text"] = chunk.text # Store text in metadata for retrieval
                 
                 vector_records.append(VectorRecord(

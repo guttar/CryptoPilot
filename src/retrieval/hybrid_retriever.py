@@ -136,23 +136,32 @@ class KeywordRetriever:
 
         scores = bm25_scores(query, [chunk.content for chunk, _ in rows])
         ranked = sorted(zip(rows, scores), key=lambda item: item[1], reverse=True)
-        return [
-            SearchResult(
-                id=chunk.vector_id or chunk.chunk_uid,
-                text=chunk.content,
-                score=float(score),
-                metadata={
+        results = []
+        from src.processors.metadata_extractor import MetadataExtractor
+
+        for (chunk, document), score in ranked[:top_k]:
+            if score <= 0:
+                continue
+            metadata = MetadataExtractor.extract(chunk.content, filename=document.filename)
+            metadata.update(
+                {
                     "kb_id": document.kb_id,
                     "doc_uid": document.doc_uid,
                     "filename": document.filename,
                     "file_type": document.file_type,
                     "page_num": chunk.page_num,
                     "retrieval": "bm25",
-                },
+                }
             )
-            for (chunk, document), score in ranked[:top_k]
-            if score > 0
-        ]
+            results.append(
+                SearchResult(
+                    id=chunk.vector_id or chunk.chunk_uid,
+                    text=chunk.content,
+                    score=float(score),
+                    metadata=metadata,
+                )
+            )
+        return results
 
 
 class HybridRetriever:

@@ -12,6 +12,7 @@ CryptoPilot 将分散的密码学资料统一解析并写入知识库，由 Agen
 - **Assistant 多 Agent 编排**：助手可绑定一个或多个用户自有 Agent；并发执行后汇总结论，通过聊天 SSE 返回工具与检索轨迹。
 - **专业工具集**：提供知识库检索、协议速查和密码参数校验，可识别 RSA 短密钥、弱哈希、AEAD Nonce 重用等常见风险。
 - **RAG 知识库**：支持 PDF、DOCX、XLSX、PPTX、Markdown、HTML、TXT 等文档解析、切分，以及 Milvus Dense + PostgreSQL BM25 的加权 RRF 混合召回与 Rerank。
+- **密码学元数据**：摄取时自动识别 RFC、标准组织、协议、算法、年份、资料类型与安全主题，支持 Agent 按白名单字段过滤。
 - **可恢复执行**：Run、配置快照和递增 Event 持久化到 PostgreSQL；SSE 支持 `Last-Event-ID` 重放。
 - **异步与取消**：HTTP 请求不阻塞 Agent 长任务，支持执行超时和服务端真实取消，而不只是关闭浏览器连接。
 - **上下文记忆**：Redis 管理带 TTL 的短期窗口；独立 Milvus Collection 保存按用户隔离的长期记忆，并拒绝疑似密钥和凭据。
@@ -201,6 +202,8 @@ npm run build
 
 当前已覆盖密码协议别名、未知协议、RSA 弱密钥、AEAD Nonce 重用、RAG 引用、用户记忆隔离和秘密信息拒绝等测试；后续将持续补充 Agent、API、数据库与故障恢复测试。
 
+升级前已入库的文档需要重新触发解析，新的密码学结构化元数据才会写入对应向量分块。
+
 ## 路线图
 
 - [x] LangGraph 多步 Agent 与专业工具
@@ -209,7 +212,7 @@ npm run build
 - [x] Redis 短期会话记忆
 - [x] Milvus 向量检索与 Rerank 基础链路
 - [x] Dense + BM25 混合召回与加权 RRF 融合
-- [ ] 面向论文/协议/RFC 的结构化元数据抽取
+- [x] 面向论文/协议/RFC 的结构化元数据抽取
 - [x] 用户隔离的长期记忆集合、语义召回与秘密信息保护
 - [x] Assistant 绑定 Agent 的真实执行、结果汇总与 SSE 轨迹
 - [ ] Agent Run 故障恢复和多 Worker 调度
