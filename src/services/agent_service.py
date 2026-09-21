@@ -14,6 +14,7 @@ from langgraph.graph.message import add_messages
 from src.llm.llm_client import LLMClient
 from src.services.crypto_tools import lookup_protocol as lookup_protocol_record
 from src.services.crypto_tools import validate_crypto_parameters as validate_crypto_parameters_record
+from src.services.knowledge_search_service import KnowledgeSearchService
 from src.services.memory_service import MemorySystem
 
 
@@ -59,10 +60,12 @@ class AgentService:
         llm_client: LLMClient | None = None,
         memory: MemorySystem | None = None,
         retriever_factory: Callable[[], Any] | None = None,
+        reranker_factory: Callable[[], Any] | None = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.memory = memory
         self.retriever_factory = retriever_factory
+        self.reranker_factory = reranker_factory
 
     @staticmethod
     async def _noop_event(_: str, __: Dict[str, Any]) -> None:
@@ -99,38 +102,29 @@ class AgentService:
         configured_top_k = min(max(int(knowledge_config.get("top_k", 5)), 1), 20)
 
         @tool("search_knowledge_base")
-        async def search_knowledge_base(query: str, top_k: int = 5) -> Dict[str, Any]:
+        async def search_knowledge_base(
+            query: str,
+            top_k: int = 5,
+            metadata_filters: Dict[str, Any] | None = None,
+        ) -> Dict[str, Any]:
             """Search bound cryptography papers, protocol specifications, and security definitions."""
             if cancel_event.is_set():
                 raise asyncio.CancelledError
             if not kb_ids:
-                return {"results": [], "message": "No knowledge base is bound to this Agent."}
-            await emit("retrieval.started", {"query": query, "kb_ids": kb_ids})
-            if self.retriever_factory is None:
-                from src.retrieval.vector_retriever import VectorRetriever
-
-                retriever = await asyncio.to_thread(VectorRetriever)
-            else:
-                retriever = self.retriever_factory()
+                return {"citations": [], "message": "No knowledge base is bound to this Agent."}
             limit = min(max(int(top_k), 1), configured_top_k)
-            results = await asyncio.to_thread(
-                retriever.retrieve,
-                query,
-                limit,
-                None,
-                kb_ids,
+            search_service = KnowledgeSearchService(
+                retriever_factory=self.retriever_factory,
+                reranker_factory=self.reranker_factory,
             )
-            documents = [
-                {
-                    "id": result.id,
-                    "text": result.text,
-                    "score": result.score,
-                    "metadata": result.metadata,
-                }
-                for result in results
-            ]
-            await emit("retrieval.completed", {"query": query, "count": len(documents)})
-            return {"results": documents}
+            return await search_service.search(
+                query=query,
+                kb_ids=kb_ids,
+                top_k=limit,
+                enable_rerank=knowledge_config.get("enable_rerank", True),
+                metadata_filters=metadata_filters,
+                emit=emit,
+            )
 
         @tool("lookup_protocol")
         def lookup_protocol(protocol: str) -> Dict[str, Any]:
@@ -270,7 +264,8 @@ class AgentService:
         system_prompt = config.get("system_prompt") or (
             "你是密码协议辅助分析 Agent。优先使用绑定知识库中的论文、标准和安全定义作为证据；"
             "涉及算法参数时调用参数校验工具；区分标准事实、检索证据和你的推断；"
-            "不要编造协议条款或安全结论，并在结论中标明来源。"
+            "不要编造协议条款或安全结论；引用检索证据时使用工具返回的 [KB1]、[KB2] 格式，"
+            "并在结论中列出对应文件和页码。"
         )
         if history_text:
             system_prompt += f"\n\n最近会话上下文：\n{history_text}"

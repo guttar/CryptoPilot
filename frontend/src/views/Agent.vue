@@ -96,8 +96,11 @@
                 <el-radio label="hybrid">混合检索</el-radio>
               </el-radio-group>
             </el-form-item>
-             <el-form-item label="Top K" v-if="form.knowledge_config.recall_strategy">
+            <el-form-item label="Top K" v-if="form.knowledge_config.recall_strategy">
               <el-slider v-model="form.knowledge_config.top_k" :min="1" :max="20" show-input />
+            </el-form-item>
+            <el-form-item label="检索重排序">
+              <el-switch v-model="form.knowledge_config.enable_rerank" active-text="开启" inactive-text="关闭" />
             </el-form-item>
 
             <el-divider content-position="left">记忆配置</el-divider>
@@ -297,7 +300,8 @@ const form = reactive({
   knowledge_config: {
     kb_ids: [],
     recall_strategy: 'hybrid',
-    top_k: 5
+    top_k: 5,
+    enable_rerank: true
   },
   memory_config: {
     enable_short_term: true,
@@ -380,7 +384,7 @@ const openDialog = (row = null) => {
     
     // Load config fields, providing defaults if null
     form.tools_config = row.tools_config || { tools: [], permissions: [] }
-    form.knowledge_config = row.knowledge_config || { kb_ids: [], recall_strategy: 'hybrid', top_k: 5 }
+    form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', top_k: 5, enable_rerank: true, ...(row.knowledge_config || {}) }
     form.memory_config = row.memory_config || { enable_short_term: true, window_size: 10, enable_long_term: false }
     form.reasoning_config = row.reasoning_config || { max_steps: 10, allow_parallel: true }
     form.security_config = row.security_config || { safety_level: 'moderate', allowed_actions: [], allow_internet: false }
@@ -399,7 +403,7 @@ const openDialog = (row = null) => {
     form.system_prompt = ''
     
     form.tools_config = { tools: [], permissions: [] }
-    form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', top_k: 5 }
+    form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', top_k: 5, enable_rerank: true }
     form.memory_config = { enable_short_term: true, window_size: 10, enable_long_term: false }
     form.reasoning_config = { max_steps: 10, allow_parallel: true }
     form.security_config = { safety_level: 'moderate', allowed_actions: [], allow_internet: false }

@@ -141,8 +141,10 @@ def process_document_task(self, doc_id: int):
             metadata = chunk.metadata.model_dump()
             # Add extra fields needed for retrieval filtering
             metadata["doc_id"] = doc.id
+            metadata["doc_uid"] = doc.doc_uid
             metadata["kb_id"] = doc.kb_id
             metadata["filename"] = doc.filename
+            metadata["file_type"] = doc.file_type
             metadata["text"] = chunk.text # Ensure text is available for retrieval
             
             vector_records.append(VectorRecord(

@@ -4,13 +4,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
 from src.database.sql_session import get_db
-from src.database.models import Agent, AgentRun, AgentRunEvent, User
+from src.database.models import Agent, AgentRun, AgentRunEvent, KnowledgeBase, User
 from src.api.dependencies import get_current_user
 from src.services.agent_service import AgentService
 from src.services.agent_run_manager import TERMINAL_STATUSES, agent_run_manager
@@ -139,12 +140,40 @@ def _owned_run(run_id: str, user_id: int, db: Session) -> AgentRun:
         raise HTTPException(status_code=403, detail="Not authorized")
     return run
 
+
+def _validate_knowledge_access(knowledge_config: Optional[dict], user_id: int, db: Session) -> None:
+    """Reject forged KB IDs before they can reach the Milvus filter."""
+    if not knowledge_config:
+        return
+    raw_ids = knowledge_config.get("kb_ids") or []
+    try:
+        kb_ids = sorted({int(value) for value in raw_ids})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="knowledge_config.kb_ids must contain integers") from exc
+    if not kb_ids:
+        return
+    accessible_ids = {
+        row[0]
+        for row in (
+            db.query(KnowledgeBase.id)
+            .filter(
+                KnowledgeBase.id.in_(kb_ids),
+                or_(KnowledgeBase.owner_id == user_id, KnowledgeBase.is_public.is_(True)),
+            )
+            .all()
+        )
+    }
+    denied = sorted(set(kb_ids) - accessible_ids)
+    if denied:
+        raise HTTPException(status_code=403, detail=f"Knowledge base access denied: {denied}")
+
 @router.post("/", response_model=AgentOut)
 def create_agent(
     agent_in: AgentCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    _validate_knowledge_access(agent_in.knowledge_config, current_user.id, db)
     agent = Agent(
         name=agent_in.name,
         description=agent_in.description,
@@ -202,6 +231,8 @@ def update_agent(
         raise HTTPException(status_code=403, detail="Not authorized")
     
     update_data = agent_in.dict(exclude_unset=True)
+    if "knowledge_config" in update_data:
+        _validate_knowledge_access(update_data["knowledge_config"], current_user.id, db)
     for field, value in update_data.items():
         setattr(agent, field, value)
         
@@ -241,6 +272,7 @@ async def run_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
     if not request.question.strip():
         raise HTTPException(status_code=422, detail="Question cannot be empty")
+    _validate_knowledge_access(agent.knowledge_config, current_user.id, db)
 
     try:
         timeout_seconds = min(
@@ -270,6 +302,7 @@ async def create_agent_run(
         raise HTTPException(status_code=404, detail="Agent not found")
     if not request.question.strip():
         raise HTTPException(status_code=422, detail="Question cannot be empty")
+    _validate_knowledge_access(agent.knowledge_config, current_user.id, db)
 
     run = AgentRun(
         id=str(uuid.uuid4()),
