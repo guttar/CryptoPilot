@@ -10,10 +10,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.settings import settings
 from src.api.routers import loadfile, query, health, auth, knowledge_base, chat, evaluation, assistant, agent, monitor, storage, notes
-from src.database.sql_session import engine, Base
-
-# 创建数据库表结构
-Base.metadata.create_all(bind=engine)
 
 
 def create_app() -> FastAPI:

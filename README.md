@@ -103,6 +103,7 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
+alembic upgrade head
 uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -125,6 +126,8 @@ npm run dev
 ```
 
 前端地址：<http://localhost:5173>
+
+Docker 镜像启动 API 时会先自动执行 `alembic upgrade head`。如果数据库曾由旧版 `Base.metadata.create_all()` 创建，请先备份并核对表结构，再执行一次 `alembic stamp head` 接管为迁移基线；不要对不确定的旧库直接 stamp。
 
 ## Agent 执行接口
 
@@ -217,7 +220,8 @@ npm run build
 - [x] Assistant 绑定 Agent 的真实执行、结果汇总与 SSE 轨迹
 - [ ] Agent Run 故障恢复和多 Worker 调度
 - [ ] 密码学评测集、引用正确率与安全结论评估
-- [ ] Alembic 迁移、CI 和生产安全加固
+- [x] Alembic 基线迁移与 GitHub Actions CI
+- [ ] 生产安全加固
 
 ## 安全说明
 

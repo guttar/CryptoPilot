@@ -1,6 +1,9 @@
-from src.database.sql_session import engine, Base
-from src.database.models import *
+"""Compatibility entry point; database schema is managed by Alembic."""
 
-print("Creating tables...")
-Base.metadata.create_all(bind=engine)
-print("Tables created.")
+from alembic import command
+from alembic.config import Config
+
+
+if __name__ == "__main__":
+    command.upgrade(Config("alembic.ini"), "head")
+    print("Database migrated to the latest revision.")
