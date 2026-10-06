@@ -17,6 +17,7 @@ from src.services.crypto_tools import validate_crypto_parameters as validate_cry
 from src.services.knowledge_search_service import KnowledgeSearchService
 from src.services.long_term_memory_service import LongTermMemoryService
 from src.services.memory_service import MemorySystem
+from src.services.conversation_context import summarize_history
 
 
 EventCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
@@ -287,17 +288,18 @@ class AgentService:
 
         memory_config = config.get("memory_config") or {}
         memory = self.memory
-        history: List[Dict[str, str]] = []
+        history_text = ""
         if session_id and memory_config.get("enable_short_term", True):
             if memory is None:
                 memory = MemorySystem()
-            history = await asyncio.to_thread(
-                memory.get_short_term_memory,
-                session_id,
-                min(max(int(memory_config.get("window_size", 10)), 1), 50),
+            history_text = await asyncio.to_thread(
+                memory.get_context, session_id, question,
+                window_size=memory_config.get("window_size", 10),
+                max_chars=memory_config.get("context_max_chars", 6000),
+                summarizer=lambda previous, messages, size: summarize_history(base_model, previous, messages, size),
+                summary_max_chars=memory_config.get("summary_max_chars", 1200),
+                enable_summary=memory_config.get("enable_summary", True),
             )
-
-        history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history)
         durable_memories: List[Dict[str, Any]] = []
         if user_id is not None and memory_config.get("enable_long_term"):
             try:

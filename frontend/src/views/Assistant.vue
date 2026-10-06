@@ -50,6 +50,12 @@
                 <el-form-item label="窗口大小" v-if="form.memory_config.enable_short_term">
                     <el-input-number v-model="form.memory_config.window_size" :min="1" :max="20" />
                 </el-form-item>
+                <el-form-item label="历史摘要" v-if="form.memory_config.enable_short_term">
+                    <el-switch v-model="form.memory_config.enable_summary" />
+                </el-form-item>
+                <el-form-item label="会话上下文字符上限" v-if="form.memory_config.enable_short_term">
+                    <el-input-number v-model="form.memory_config.context_max_chars" :min="256" :max="32000" :step="1000" />
+                </el-form-item>
                 <el-form-item label="长期记忆">
                     <el-switch v-model="form.memory_config.enable_long_term" />
                 </el-form-item>
@@ -158,6 +164,12 @@
                                 <el-form-item label="窗口大小" v-if="form.memory_config.enable_short_term">
                                     <el-input-number v-model="form.memory_config.window_size" :min="1" :max="20" />
                                     <div class="form-tip">保留的最近轮数（建议 5-10 轮）</div>
+                                </el-form-item>
+                                <el-form-item label="历史摘要" v-if="form.memory_config.enable_short_term">
+                                    <el-switch v-model="form.memory_config.enable_summary" />
+                                </el-form-item>
+                                <el-form-item label="会话上下文字符上限" v-if="form.memory_config.enable_short_term">
+                                    <el-input-number v-model="form.memory_config.context_max_chars" :min="256" :max="32000" :step="1000" />
                                 </el-form-item>
                                 <el-form-item label="长期记忆">
                                     <el-switch v-model="form.memory_config.enable_long_term" />
@@ -298,7 +310,7 @@ const form = reactive({
   kb_ids: [],
   agent_ids: [],
   memory_config: {
-      enable_short_term: true,
+      enable_short_term: true, enable_summary: true, context_max_chars: 6000,
       window_size: 10,
       enable_long_term: false
   },
@@ -413,11 +425,12 @@ const startChat = async (row) => {
     }
     if (!data.memory_config) {
         data.memory_config = {
-            enable_short_term: true,
+            enable_short_term: true, enable_summary: true, context_max_chars: 6000,
             window_size: 10,
             enable_long_term: false
         }
     }
+    data.memory_config = { enable_summary: true, context_max_chars: 6000, ...data.memory_config }
     Object.assign(form, data)
     
     chatVisible.value = true

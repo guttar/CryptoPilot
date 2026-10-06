@@ -196,6 +196,16 @@ CryptoPilot/
 
 ## 测试与构建
 
+### 会话上下文配置
+
+Agent 和普通 Assistant 的 `memory_config` 支持 `enable_summary`（默认 true）、
+`window_size`（最近消息条数）、`summary_max_chars`（默认 1200）和
+`context_max_chars`（默认 6000）。超过窗口的消息会由模型增量压缩为历史摘要，
+摘要与最近消息共同作为上下文，不作为外部事实证据。Redis 使用 WATCH 事务避免
+摘要覆盖并发写入；摘要失败时保留原始消息并退回最近窗口。摘要、原始消息和历史归档
+均有 TTL，删除会话时一并清除。字符预算是明确的大小上限，不等同于精确 Token 计数；
+摘要调用会产生额外模型费用。Redis 历史缓冲默认最多保存 100 条消息。
+
 ```bash
 python -m unittest discover -s tests -v
 

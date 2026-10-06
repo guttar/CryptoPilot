@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     # Memory Config
     SHORT_TERM_MEMORY_TTL: int = 3600  # 1 hour
     LONG_TERM_MEMORY_COLLECTION: str = "user_memory"
-    MEMORY_HISTORY_LIMIT: int = 10
+    MEMORY_HISTORY_LIMIT: int = 100
 
     # Durable Agent execution
     AGENT_MAX_TIMEOUT_SECONDS: int = 300

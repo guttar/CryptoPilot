@@ -369,8 +369,10 @@ async def chat_stream(
             # 保存到记忆系统
             if full_answer:
                 try:
-                    memory_system.add_short_term_memory(session_uid, "user", request.query)
-                    memory_system.add_short_term_memory(session_uid, "assistant", full_answer)
+                    memory_config = assistant_config.get("memory_config") or {}
+                    if memory_config.get("enable_short_term", memory_config.get("enable", True)):
+                        await asyncio.to_thread(memory_system.add_short_term_memory, session_uid, "user", request.query)
+                        await asyncio.to_thread(memory_system.add_short_term_memory, session_uid, "assistant", full_answer)
                 except Exception as e:
                     logger.error(f"Failed to save memory: {e}")
 
