@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from src.settings import settings
 from src.utils.logger import logger
 from src.services.long_term_memory_service import LongTermMemoryService
-from src.services.conversation_context import format_context
+from src.services.conversation_context import format_context, select_related_history
 
 class MemorySystem:
     def __init__(self, redis_client=None):
@@ -65,7 +65,8 @@ class MemorySystem:
         self.redis_client.delete(key, f"session:{session_id}:summary", f"session:{session_id}:archive")
 
     def get_context(self, session_id, query="", window_size=10, max_chars=6000,
-                    summarizer=None, summary_max_chars=1200, enable_summary=True):
+                    summarizer=None, summary_max_chars=1200, enable_summary=True,
+                    relevant_history_top_k=3):
         """Compress evicted messages atomically; failure preserves the raw history."""
         window_size = min(max(int(window_size), 1), 50)
         summary_max_chars = min(max(int(summary_max_chars), 128), 4000)
@@ -81,11 +82,12 @@ class MemorySystem:
                     raw_summary = pipe.get(summary_key) or b""
                     summary = raw_summary.decode() if isinstance(raw_summary, bytes) else raw_summary
                     older = messages[:-window_size]
+                    archive = json.loads(pipe.get(archive_key) or "[]")
+                    related = select_related_history(query, archive + older, relevant_history_top_k)
                     if older and enable_summary and summarizer:
                         new_summary = summarizer(summary, older, summary_max_chars)
                         if not isinstance(new_summary, str) or not new_summary.strip():
                             raise ValueError("Empty conversation summary")
-                        archive = json.loads(pipe.get(archive_key) or "[]")
                         pipe.multi()
                         pipe.set(summary_key, new_summary[:summary_max_chars], ex=self.ttl)
                         pipe.set(archive_key, json.dumps((archive + older)[-50:]), ex=self.ttl)
@@ -93,7 +95,7 @@ class MemorySystem:
                         pipe.expire(history_key, self.ttl)
                         pipe.execute()
                         summary = new_summary[:summary_max_chars]
-                    return format_context(summary, messages[-window_size:], max_chars)
+                    return format_context(summary, messages[-window_size:], max_chars, related)
             except redis.WatchError:
                 continue
             except Exception as exc:

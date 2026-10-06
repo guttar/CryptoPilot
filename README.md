@@ -206,6 +206,11 @@ Agent 和普通 Assistant 的 `memory_config` 支持 `enable_summary`（默认 t
 均有 TTL，删除会话时一并清除。字符预算是明确的大小上限，不等同于精确 Token 计数；
 摘要调用会产生额外模型费用。Redis 历史缓冲默认最多保存 100 条消息。
 
+`relevant_history_top_k`（默认 3，最多 10）按当前问题的英文词项和中文双字词项，
+从最近 50 条已归档消息中选择相关历史轮次，并保留该轮的用户问题和助手回答。
+相关历史与摘要共享上下文字符预算；这是可解释的词项匹配，不是语义向量召回。
+近期消息始终优先，长期偏好仍由独立的用户记忆集合管理。
+
 ```bash
 python -m unittest discover -s tests -v
 

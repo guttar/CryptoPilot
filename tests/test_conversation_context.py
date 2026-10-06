@@ -2,7 +2,7 @@ import unittest
 import fakeredis
 
 from src.services.memory_service import MemorySystem
-from src.services.conversation_context import format_context
+from src.services.conversation_context import format_context, select_related_history
 
 
 class ConversationContextTests(unittest.TestCase):
@@ -61,3 +61,29 @@ class ConversationContextTests(unittest.TestCase):
         self.assertGreater(self.redis.ttl("session:a:summary"), 0)
         self.memory.clear_short_term_memory("a")
         self.assertEqual(self.memory.get_context("a"), "")
+
+    def test_related_history_keeps_question_and_answer_and_excludes_unrelated_turns(self):
+        history = [
+            {"role": "user", "content": "TLS 1.3 key derivation"},
+            {"role": "assistant", "content": "It uses HKDF"},
+            {"role": "user", "content": "weather tomorrow"},
+            {"role": "assistant", "content": "sunny"},
+        ]
+        chosen = select_related_history("TLS 1.3", history)
+        self.assertEqual(chosen, history[:2])
+        self.assertEqual(select_related_history("", history), [])
+
+    def test_archived_history_can_be_recalled_after_compression(self):
+        for role, text in [("user", "TLS 1.3 key derivation"), ("assistant", "HKDF"),
+                           ("user", "weather"), ("assistant", "sunny")]:
+            self.memory.add_short_term_memory("a", role, text)
+        self.memory.get_context("a", "weather", window_size=2, summarizer=lambda *args: "short summary")
+        context = self.memory.get_context("a", "TLS 1.3", window_size=2)
+        self.assertIn("相关历史", context)
+        self.assertIn("HKDF", context)
+        self.assertNotIn("HKDF", self.memory.get_context("b", "TLS 1.3"))
+
+    def test_related_history_supports_chinese_and_respects_context_budget(self):
+        history = [{"role": "user", "content": "讨论前向保密性质"}]
+        self.assertEqual(select_related_history("前向保密", history), history)
+        self.assertLessEqual(len(format_context("s" * 1000, [], 256, history)), 256)

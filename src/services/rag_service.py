@@ -244,6 +244,7 @@ class RAGService:
             max_chars=config.get("context_max_chars", 6000),
             summary_max_chars=config.get("summary_max_chars", 1200),
             enable_summary=config.get("enable_summary", True),
+            relevant_history_top_k=config.get("relevant_history_top_k", 3),
             summarizer=lambda previous, messages, size: summarize_history(self.llm_client.llm, previous, messages, size),
         )
 

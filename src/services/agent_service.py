@@ -299,6 +299,7 @@ class AgentService:
                 summarizer=lambda previous, messages, size: summarize_history(base_model, previous, messages, size),
                 summary_max_chars=memory_config.get("summary_max_chars", 1200),
                 enable_summary=memory_config.get("enable_summary", True),
+                relevant_history_top_k=memory_config.get("relevant_history_top_k", 3),
             )
         durable_memories: List[Dict[str, Any]] = []
         if user_id is not None and memory_config.get("enable_long_term"):
