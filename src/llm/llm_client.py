@@ -1,5 +1,4 @@
 from typing import AsyncIterator, List, Optional, Tuple
-from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.settings import settings
 from src.utils.logger import logger
@@ -24,6 +23,7 @@ class LLMClient:
         self.api_key = settings.DASHSCOPE_API_KEY
         
         try:
+            from langchain_community.chat_models import ChatTongyi
             self.llm = ChatTongyi(
                 model=self.model_name,
                 temperature=0.7,
@@ -94,8 +94,7 @@ class LLMClient:
             每个流式 token 的文本内容。
         """
         if not self.llm:
-            yield "LLM Service unavailable."
-            return
+            raise RuntimeError("LLM Service unavailable")
 
         try:
             sys_msg = system_prompt if system_prompt else "You are a helpful RAG assistant."
@@ -108,7 +107,7 @@ class LLMClient:
                     yield chunk.content
         except Exception as e:
             logger.error(f"LLM streaming failed: {e}")
-            yield f"Error generating response: {str(e)}"
+            raise RuntimeError("LLM streaming failed") from e
 
     def generate_response(self, query: str, context: str, system_prompt: Optional[str] = None) -> str:
         """基于RAG上下文生成回答。

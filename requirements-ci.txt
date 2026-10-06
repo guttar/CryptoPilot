@@ -7,3 +7,6 @@ fakeredis>=2.23
 loguru>=0.7
 langchain-core==1.2.7
 langgraph==1.0.7
+fastapi==0.128.0
+python-jose>=3.5
+httpx>=0.27
