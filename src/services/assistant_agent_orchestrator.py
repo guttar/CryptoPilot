@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
+from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, Iterable, List
 
 
@@ -78,6 +80,27 @@ class AssistantAgentOrchestrator:
         response = await llm.ainvoke(messages)
         content = getattr(response, "content", response)
         return str(content or "").strip()
+
+    @staticmethod
+    def _normalize_citations(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Give all child evidence a shared citation namespace before synthesis."""
+        results = deepcopy(results)
+        global_ids: dict[tuple, str] = {}
+        for item in results:
+            local_ids = {}
+            for trace in item.get("tool_trace", []):
+                if trace.get("tool") != "search_knowledge_base":
+                    continue
+                for citation in (trace.get("result") or {}).get("citations", []):
+                    identity = (citation.get("kb_id"), citation.get("chunk_id"))
+                    global_id = global_ids.setdefault(identity, f"KB{len(global_ids) + 1}")
+                    local_ids[citation.get("citation_id")] = global_id
+                    citation["citation_id"] = global_id
+            item["answer"] = re.sub(
+                r"\[(KB\d+)\]", lambda match: f"[{local_ids[match.group(1)]}]"
+                if match.group(1) in local_ids else match.group(0), item.get("answer", ""),
+            )
+        return results
 
     @staticmethod
     def _source_documents(results: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -172,6 +195,8 @@ class AssistantAgentOrchestrator:
                 }
 
         all_results = await asyncio.gather(*(run_one(agent) for agent in agents))
+        if len(agents) > 1:
+            all_results = self._normalize_citations(all_results)
         successful = [item for item in all_results if item.get("answer")]
         if not successful:
             errors = "; ".join(

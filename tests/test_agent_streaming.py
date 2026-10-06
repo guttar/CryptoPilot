@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 from src.services.agent_service import AgentService
+from unittest.mock import patch
 
 
 class FakeModel:
@@ -29,6 +30,23 @@ class FakeModel:
 
 
 class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_searches_use_stable_unique_citation_ids(self):
+        class Search:
+            counter = 0
+            def __init__(self, **kwargs):
+                pass
+            async def search(inner, **kwargs):
+                Search.counter += 1
+                chunk = "a" if Search.counter in {1, 3} else "b"
+                return {"citations": [{"citation_id": "KB1", "chunk_id": chunk}]}
+        service = AgentService(llm_client=SimpleNamespace(llm=FakeModel()))
+        async def emit(*args):
+            pass
+        tools = service._build_tools({"knowledge_config": {"kb_ids": [1]}}, emit, [], asyncio.Event(), 1)
+        with patch("src.services.agent_service.KnowledgeSearchService", Search):
+            results = [await tools["search_knowledge_base"].ainvoke({"query": "q"}) for _ in range(3)]
+        self.assertEqual([r["citations"][0]["citation_id"] for r in results], ["KB1", "KB2", "KB1"])
+
     async def execute(self, model, **kwargs):
         events = []
         async def emit(name, payload):

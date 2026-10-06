@@ -37,6 +37,20 @@ class FakeAgentService:
 
 
 class AssistantAgentOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    def test_distinct_child_sources_receive_distinct_global_citations(self):
+        original = [
+            {"answer": "first [KB1]", "tool_trace": [{"tool": "search_knowledge_base", "result": {
+                "citations": [{"citation_id": "KB1", "kb_id": 1, "chunk_id": "a"}]
+            }}]},
+            {"answer": "second [KB1]", "tool_trace": [{"tool": "search_knowledge_base", "result": {
+                "citations": [{"citation_id": "KB1", "kb_id": 2, "chunk_id": "b"}]
+            }}]},
+        ]
+        normalized = AssistantAgentOrchestrator._normalize_citations(original)
+        self.assertEqual(normalized[1]["answer"], "second [KB2]")
+        self.assertEqual(normalized[1]["tool_trace"][0]["result"]["citations"][0]["citation_id"], "KB2")
+        self.assertEqual(original[1]["answer"], "second [KB1]")
+
     async def test_single_agent_streaming_is_forwarded_before_completion(self):
         events = []
         class StreamingAgent(FakeAgentService):

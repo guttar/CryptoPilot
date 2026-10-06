@@ -113,6 +113,7 @@ class AgentService:
         memory_config = config.get("memory_config") or {}
         kb_ids = [int(value) for value in knowledge_config.get("kb_ids", [])]
         configured_top_k = min(max(int(knowledge_config.get("top_k", 5)), 1), 20)
+        citation_ids: dict[tuple, str] = {}
 
         @tool("search_knowledge_base")
         async def search_knowledge_base(
@@ -130,7 +131,7 @@ class AgentService:
                 retriever_factory=self.retriever_factory,
                 reranker_factory=self.reranker_factory,
             )
-            return await search_service.search(
+            result = await search_service.search(
                 query=query,
                 kb_ids=kb_ids,
                 top_k=limit,
@@ -140,6 +141,10 @@ class AgentService:
                 metadata_filters=metadata_filters,
                 emit=emit,
             )
+            for citation in result.get("citations", []):
+                identity = (citation.get("kb_id"), citation.get("chunk_id"))
+                citation["citation_id"] = citation_ids.setdefault(identity, f"KB{len(citation_ids) + 1}")
+            return result
 
         @tool("lookup_protocol")
         def lookup_protocol(protocol: str) -> Dict[str, Any]:
