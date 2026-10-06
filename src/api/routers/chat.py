@@ -225,6 +225,7 @@ async def chat(
             session_id=session_uid,
             kb_ids=valid_kb_ids,
             assistant_config=assistant_config,
+            user_id=current_user.id,
         )
     
     # 保存交互记录到数据库
@@ -357,6 +358,7 @@ async def chat_stream(
                     session_id=session_uid,
                     kb_ids=valid_kb_ids,
                     assistant_config=assistant_config,
+                    user_id=current_user.id,
                 ):
                     if event["type"] == "token":
                         full_answer += event["content"]

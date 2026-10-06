@@ -217,6 +217,10 @@ Agent 和普通 Assistant 的 `memory_config` 支持 `enable_summary`（默认 t
 相关历史与摘要共享上下文字符预算；这是可解释的词项匹配，不是语义向量召回。
 近期消息始终优先，长期偏好仍由独立的用户记忆集合管理。
 
+普通 Assistant 的流式和非流式问答也支持真实长期记忆召回，由认证接口传入用户身份，
+不接受模型选择用户。`long_term_top_k` 默认 3，`long_term_max_chars` 默认 2000。
+关闭短期记忆时不读写短期窗口；缺少用户身份或记忆服务不可用时，不访问其他用户数据。
+
 ```bash
 python -m unittest discover -s tests -v
 

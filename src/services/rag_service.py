@@ -1,10 +1,7 @@
 from typing import AsyncIterator, List, Dict, Any, Optional
 from src.retrieval.hybrid_retriever import HybridRetriever
-from src.retrieval.reranker import DashScopeReranker
-from src.llm.llm_client import LLMClient
 from src.utils.logger import logger
 from src.settings import settings
-from src.services.question_analyzer import QuestionAnalyzer
 from src.services.memory_service import MemorySystem
 from src.services.conversation_context import summarize_history
 import asyncio
@@ -23,6 +20,9 @@ class RAGService:
         
         初始化向量检索器、LLM客户端、重排序器、问题分析器和记忆系统等核心组件。
         """
+        from src.retrieval.reranker import DashScopeReranker
+        from src.llm.llm_client import LLMClient
+        from src.services.question_analyzer import QuestionAnalyzer
         self.retriever = HybridRetriever()
         self.llm_client = LLMClient()
         self.reranker = DashScopeReranker()
@@ -35,7 +35,8 @@ class RAGService:
         top_k: int = 5, 
         session_id: str = "default", 
         kb_ids: Optional[List[int]] = None,
-        assistant_config: Optional[Dict[str, Any]] = None
+        assistant_config: Optional[Dict[str, Any]] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         执行查询操作
@@ -84,16 +85,8 @@ class RAGService:
         if enable_short_term:
             history_str = self._history_context(session_id, query_text, memory_config)
         
-        # 长期记忆注入（占位符/模拟）
-        enable_long_term = memory_config.get("enable_long_term", False)
-        long_term_context = ""
-        if enable_long_term:
-            # 在实际系统中，我们会嵌入查询并搜索长期向量存储
-            # 目前我们模拟这个功能或仅记录日志
-            logger.info(f"Long-term memory enabled for session {session_id}")
-            # long_term_memories = self.memory.retrieve_long_term_memory(query_text)
-            # long_term_context = "\n".join([m['content'] for m in long_term_memories])
-            pass
+        long_term_context = self._long_term_context(user_id, query_text, memory_config)
+        history_str = "\n\n".join(part for part in [history_str, long_term_context] if part)
 
         # 1. 分析问题（结合历史对话）
         # 如果没有知识库，则处于"通用聊天"模式
@@ -102,8 +95,6 @@ class RAGService:
             # 通用聊天模式
             logger.info("No KB selected, using General Chat Mode")
             context = f"历史对话:\n{history_str}" if history_str else ""
-            if long_term_context:
-                context = f"长期记忆:\n{long_term_context}\n\n{context}"
                 
             if system_prompt:
                 context = f"系统指令: {system_prompt}\n\n{context}"
@@ -153,6 +144,7 @@ class RAGService:
         session_id: str = "default",
         kb_ids: Optional[List[int]] = None,
         assistant_config: Optional[Dict[str, Any]] = None,
+        user_id: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """执行流式查询，逐 token 产出事件。
 
@@ -179,6 +171,8 @@ class RAGService:
         history_str = ""
         if enable_short_term:
             history_str = await asyncio.to_thread(self._history_context, session_id, query_text, memory_config)
+        long_term_context = await asyncio.to_thread(self._long_term_context, user_id, query_text, memory_config)
+        history_str = "\n\n".join(part for part in [history_str, long_term_context] if part)
 
         # 通用聊天模式（无知识库）
         if not kb_ids:
@@ -247,6 +241,23 @@ class RAGService:
             relevant_history_top_k=config.get("relevant_history_top_k", 3),
             summarizer=lambda previous, messages, size: summarize_history(self.llm_client.llm, previous, messages, size),
         )
+
+    def _long_term_context(self, user_id, query, config):
+        if not config.get("enable_long_term") or user_id is None:
+            return ""
+        try:
+            memories = self.memory.retrieve_long_term_memory(
+                user_id=int(user_id), query=query,
+                top_k=min(max(int(config.get("long_term_top_k", 3)), 1), 10),
+            )
+            if not memories:
+                return ""
+            budget = min(max(int(config.get("long_term_max_chars", 2000)), 128), 8000)
+            text = "\n".join(f"- {item.get('text', '')}" for item in memories)[:budget]
+            return "长期记忆（仅作用户上下文，不作为外部事实证据）：\n" + text
+        except Exception as exc:
+            logger.warning(f"Long-term recall unavailable: {exc}")
+            return ""
 
     def _single_hop_query(
         self, 
