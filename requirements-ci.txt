@@ -5,3 +5,5 @@ SQLAlchemy>=2.0.25
 redis>=5.0
 fakeredis>=2.23
 loguru>=0.7
+langchain-core==1.2.7
+langgraph==1.0.7

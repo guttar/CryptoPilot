@@ -21,10 +21,12 @@ class AssistantAgentOrchestrator:
         agent_service_factory: AgentServiceFactory | None = None,
         synthesizer: Synthesizer | None = None,
         max_concurrency: int = 3,
+        llm_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._agent_service_factory = agent_service_factory
         self._synthesizer = synthesizer
         self._max_concurrency = min(max(int(max_concurrency), 1), 8)
+        self._llm_factory = llm_factory
 
     @staticmethod
     async def _noop_event(_: str, __: Dict[str, Any]) -> None:
@@ -39,19 +41,21 @@ class AssistantAgentOrchestrator:
 
         return AgentService()
 
-    async def _default_synthesize(self, question: str, results: List[Dict[str, Any]]) -> str:
+    async def _default_synthesize(self, question: str, results: List[Dict[str, Any]],
+                                  emit: EventCallback | None = None) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
-        from src.llm.llm_client import LLMClient
-
-        llm = LLMClient().llm
+        if self._llm_factory is None:
+            from src.llm.llm_client import LLMClient
+            llm = LLMClient().llm
+        else:
+            llm = self._llm_factory()
         if llm is None:
             raise RuntimeError("LLM service is unavailable for multi-Agent synthesis")
         evidence = [
             {"agent": item["agent_name"], "answer": item["answer"]}
             for item in results
         ]
-        response = await llm.ainvoke(
-            [
+        messages = [
                 SystemMessage(
                     content=(
                         "你是密码协议分析总编排器。请综合各子 Agent 的结论，消除重复与冲突；"
@@ -63,7 +67,15 @@ class AssistantAgentOrchestrator:
                     + json.dumps(evidence, ensure_ascii=False)
                 ),
             ]
-        )
+        if emit is not None:
+            parts = []
+            async for chunk in llm.astream(messages):
+                content = getattr(chunk, "content", "")
+                if isinstance(content, str) and content:
+                    parts.append(content)
+                    await emit("answer.delta", {"content": content})
+            return "".join(parts)
+        response = await llm.ainvoke(messages)
         content = getattr(response, "content", response)
         return str(content or "").strip()
 
@@ -104,6 +116,7 @@ class AssistantAgentOrchestrator:
         session_id: str,
         user_id: int,
         emit: EventCallback | None = None,
+        stream_answer: bool = False,
     ) -> Dict[str, Any]:
         if not agents:
             raise ValueError("At least one Agent is required")
@@ -130,6 +143,7 @@ class AssistantAgentOrchestrator:
                         session_id=f"{session_id}:agent:{agent_id}",
                         user_id=user_id,
                         emit=scoped_emit,
+                        stream_answer=stream_answer and len(agents) == 1,
                     )
                 item = {
                     "agent_id": agent_id,
@@ -165,13 +179,17 @@ class AssistantAgentOrchestrator:
             )
             raise RuntimeError(f"All attached Agents failed: {errors}")
 
-        if len(successful) == 1:
+        if len(successful) == 1 and (not stream_answer or len(agents) == 1):
             answer = successful[0]["answer"]
+        elif stream_answer and self._synthesizer is None:
+            answer = await self._default_synthesize(question, successful, emit=emit)
         else:
             synthesizer = self._synthesizer or self._default_synthesize
             answer_value = synthesizer(question, successful)
             answer = await answer_value if inspect.isawaitable(answer_value) else answer_value
             answer = str(answer or "").strip()
+            if stream_answer:
+                await emit("answer.delta", {"content": answer})
 
         tool_trace = [
             {"agent_id": item["agent_id"], "agent_name": item["agent_name"], **trace}

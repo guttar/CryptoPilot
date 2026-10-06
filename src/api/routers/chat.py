@@ -317,9 +317,10 @@ async def chat_stream(
                 event_queue: asyncio.Queue = asyncio.Queue()
 
                 async def emit(event_type: str, payload: dict) -> None:
-                    await event_queue.put(
-                        {"type": "agent_event", "event": event_type, "data": payload}
-                    )
+                    if event_type == "answer.delta":
+                        await event_queue.put({"type": "token", "content": payload["content"]})
+                    else:
+                        await event_queue.put({"type": "agent_event", "event": event_type, "data": payload})
 
                 agent_task = asyncio.create_task(
                     AssistantAgentOrchestrator().run(
@@ -328,6 +329,7 @@ async def chat_stream(
                         session_id=session_uid,
                         user_id=current_user.id,
                         emit=emit,
+                        stream_answer=True,
                     )
                 )
                 while not agent_task.done() or not event_queue.empty():
@@ -335,13 +337,17 @@ async def chat_stream(
                         event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                     except asyncio.TimeoutError:
                         continue
-                    agent_trace.append(event)
+                    if event["type"] == "token":
+                        full_answer += event["content"]
+                    else:
+                        agent_trace.append(event)
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
                 result = await agent_task
+                if not full_answer and result["answer"]:
+                    yield f"data: {json.dumps({'type': 'token', 'content': result['answer']}, ensure_ascii=False)}\n\n"
                 full_answer = result["answer"]
                 source_docs = result.get("source_documents", [])
-                yield f"data: {json.dumps({'type': 'token', 'content': full_answer}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps({'type': 'sources', 'data': source_docs}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
             else:

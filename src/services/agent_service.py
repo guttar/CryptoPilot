@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Annotated, Any, Awaitable, Callable, Dict, List, TypedDict
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, TypedDict, TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from src.llm.llm_client import LLMClient
+if TYPE_CHECKING:
+    from src.llm.llm_client import LLMClient
 from src.services.crypto_tools import lookup_protocol as lookup_protocol_record
 from src.services.crypto_tools import validate_crypto_parameters as validate_crypto_parameters_record
 from src.services.knowledge_search_service import KnowledgeSearchService
@@ -66,7 +67,10 @@ class AgentService:
         reranker_factory: Callable[[], Any] | None = None,
         long_term_memory: LongTermMemoryService | None = None,
     ):
-        self.llm_client = llm_client or LLMClient()
+        if llm_client is None:
+            from src.llm.llm_client import LLMClient
+            llm_client = LLMClient()
+        self.llm_client = llm_client
         self.memory = memory
         self.retriever_factory = retriever_factory
         self.reranker_factory = reranker_factory
@@ -201,6 +205,7 @@ class AgentService:
         user_id: int | None = None,
         emit: EventCallback | None = None,
         cancel_event: asyncio.Event | None = None,
+        stream_answer: bool = False,
     ) -> Dict[str, Any]:
         if not self.llm_client.llm:
             raise RuntimeError("LLM service is unavailable")
@@ -260,17 +265,32 @@ class AgentService:
 
         async def finalize(state: AgentState) -> Dict[str, Any]:
             await emit("agent.finalizing", {"reason": "step_limit"})
-            response = await base_model.ainvoke(
-                state["messages"]
-                + [SystemMessage(content="Tool budget is exhausted. Give the best grounded final answer now without calling tools.")]
-            )
+            messages = state["messages"] + [SystemMessage(content="Tool budget is exhausted. Give the best grounded final answer now without calling tools.")]
+            if stream_answer:
+                return await final_stream({**state, "messages": messages})
+            response = await base_model.ainvoke(messages)
             return {"messages": [response], "steps": state.get("steps", 0)}
+
+        async def final_stream(state: AgentState) -> Dict[str, Any]:
+            # Planning and tool messages stay private; only the final answer is streamed.
+            parts = []
+            messages = state["messages"] + [SystemMessage(content=(
+                "现在输出最终答案，不调用工具。只使用已有证据，保留引用，说明不确定性。"
+            ))]
+            async for chunk in base_model.astream(messages):
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
+                content = _message_text(chunk.content)
+                if content:
+                    parts.append(content)
+                    await emit("answer.delta", {"content": content})
+            return {"messages": [AIMessage(content="".join(parts))], "steps": state.get("steps", 0)}
 
         def route(state: AgentState) -> str:
             last = state["messages"][-1]
             calls = getattr(last, "tool_calls", None) or []
             if not calls:
-                return "end"
+                return "final_stream" if stream_answer else "end"
             return "tools"
 
         def after_tools(state: AgentState) -> str:
@@ -280,10 +300,12 @@ class AgentService:
         graph.add_node("agent", call_agent)
         graph.add_node("tools", call_tools)
         graph.add_node("finalize", finalize)
+        graph.add_node("final_stream", final_stream)
         graph.add_edge(START, "agent")
-        graph.add_conditional_edges("agent", route, {"tools": "tools", "end": END})
+        graph.add_conditional_edges("agent", route, {"tools": "tools", "end": END, "final_stream": "final_stream"})
         graph.add_conditional_edges("tools", after_tools, {"agent": "agent", "finalize": "finalize"})
         graph.add_edge("finalize", END)
+        graph.add_edge("final_stream", END)
         runnable = graph.compile()
 
         memory_config = config.get("memory_config") or {}

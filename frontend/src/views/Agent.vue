@@ -516,6 +516,9 @@ const applyRunEvent = (event) => {
   if (event.event_type === 'run.completed') {
     runAnswer.value = event.payload.answer || ''
   }
+  if (event.event_type === 'answer.delta') {
+    runAnswer.value += event.payload.content || ''
+  }
 }
 
 const connectRunStream = async (runId) => {

@@ -164,12 +164,18 @@ Authorization: Bearer <token>
 ```text
 run.started
 agent.thinking
+answer.delta
 tool.started
 retrieval.started
 retrieval.completed
 tool.completed
 run.completed | run.failed | run.timed_out | run.cancelled
 ```
+
+直接 Agent Run 的最终答案使用模型 `astream` 输出 `answer.delta`，事件会持久化并可补读。
+关联单 Agent 的聊天转发最终答案片段；多个 Agent 先完成分析，再流式生成汇总答案。
+工具决策和中间草稿不作为最终答案输出。流式最终整理会额外调用一次模型；普通非流式
+运行保留原先调用流程。流中断返回失败状态，不把未完成文本当作成功答案。
 
 ## 目录结构
 

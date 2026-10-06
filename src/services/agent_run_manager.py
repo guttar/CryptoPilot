@@ -139,6 +139,7 @@ class AgentRunManager:
                     user_id=record["user_id"],
                     emit=emit,
                     cancel_event=cancel_event,
+                    stream_answer=True,
                 )
             await asyncio.to_thread(
                 self._set_status,
