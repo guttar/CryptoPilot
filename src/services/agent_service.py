@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Annotated, Any, Awaitable, Callable, Dict, List, TypedDict
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, TypedDict, TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from src.llm.llm_client import LLMClient
+if TYPE_CHECKING:
+    from src.llm.llm_client import LLMClient
 from src.services.crypto_tools import lookup_protocol as lookup_protocol_record
 from src.services.crypto_tools import validate_crypto_parameters as validate_crypto_parameters_record
 from src.services.knowledge_search_service import KnowledgeSearchService
 from src.services.long_term_memory_service import LongTermMemoryService
 from src.services.memory_service import MemorySystem
+from src.services.conversation_context import summarize_history
 
 
 EventCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
@@ -65,7 +67,10 @@ class AgentService:
         reranker_factory: Callable[[], Any] | None = None,
         long_term_memory: LongTermMemoryService | None = None,
     ):
-        self.llm_client = llm_client or LLMClient()
+        if llm_client is None:
+            from src.llm.llm_client import LLMClient
+            llm_client = LLMClient()
+        self.llm_client = llm_client
         self.memory = memory
         self.retriever_factory = retriever_factory
         self.reranker_factory = reranker_factory
@@ -108,6 +113,7 @@ class AgentService:
         memory_config = config.get("memory_config") or {}
         kb_ids = [int(value) for value in knowledge_config.get("kb_ids", [])]
         configured_top_k = min(max(int(knowledge_config.get("top_k", 5)), 1), 20)
+        citation_ids: dict[tuple, str] = {}
 
         @tool("search_knowledge_base")
         async def search_knowledge_base(
@@ -125,7 +131,7 @@ class AgentService:
                 retriever_factory=self.retriever_factory,
                 reranker_factory=self.reranker_factory,
             )
-            return await search_service.search(
+            result = await search_service.search(
                 query=query,
                 kb_ids=kb_ids,
                 top_k=limit,
@@ -135,6 +141,10 @@ class AgentService:
                 metadata_filters=metadata_filters,
                 emit=emit,
             )
+            for citation in result.get("citations", []):
+                identity = (citation.get("kb_id"), citation.get("chunk_id"))
+                citation["citation_id"] = citation_ids.setdefault(identity, f"KB{len(citation_ids) + 1}")
+            return result
 
         @tool("lookup_protocol")
         def lookup_protocol(protocol: str) -> Dict[str, Any]:
@@ -200,6 +210,7 @@ class AgentService:
         user_id: int | None = None,
         emit: EventCallback | None = None,
         cancel_event: asyncio.Event | None = None,
+        stream_answer: bool = False,
     ) -> Dict[str, Any]:
         if not self.llm_client.llm:
             raise RuntimeError("LLM service is unavailable")
@@ -259,17 +270,32 @@ class AgentService:
 
         async def finalize(state: AgentState) -> Dict[str, Any]:
             await emit("agent.finalizing", {"reason": "step_limit"})
-            response = await base_model.ainvoke(
-                state["messages"]
-                + [SystemMessage(content="Tool budget is exhausted. Give the best grounded final answer now without calling tools.")]
-            )
+            messages = state["messages"] + [SystemMessage(content="Tool budget is exhausted. Give the best grounded final answer now without calling tools.")]
+            if stream_answer:
+                return await final_stream({**state, "messages": messages})
+            response = await base_model.ainvoke(messages)
             return {"messages": [response], "steps": state.get("steps", 0)}
+
+        async def final_stream(state: AgentState) -> Dict[str, Any]:
+            # Planning and tool messages stay private; only the final answer is streamed.
+            parts = []
+            messages = state["messages"] + [SystemMessage(content=(
+                "现在输出最终答案，不调用工具。只使用已有证据，保留引用，说明不确定性。"
+            ))]
+            async for chunk in base_model.astream(messages):
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
+                content = _message_text(chunk.content)
+                if content:
+                    parts.append(content)
+                    await emit("answer.delta", {"content": content})
+            return {"messages": [AIMessage(content="".join(parts))], "steps": state.get("steps", 0)}
 
         def route(state: AgentState) -> str:
             last = state["messages"][-1]
             calls = getattr(last, "tool_calls", None) or []
             if not calls:
-                return "end"
+                return "final_stream" if stream_answer else "end"
             return "tools"
 
         def after_tools(state: AgentState) -> str:
@@ -279,25 +305,29 @@ class AgentService:
         graph.add_node("agent", call_agent)
         graph.add_node("tools", call_tools)
         graph.add_node("finalize", finalize)
+        graph.add_node("final_stream", final_stream)
         graph.add_edge(START, "agent")
-        graph.add_conditional_edges("agent", route, {"tools": "tools", "end": END})
+        graph.add_conditional_edges("agent", route, {"tools": "tools", "end": END, "final_stream": "final_stream"})
         graph.add_conditional_edges("tools", after_tools, {"agent": "agent", "finalize": "finalize"})
         graph.add_edge("finalize", END)
+        graph.add_edge("final_stream", END)
         runnable = graph.compile()
 
         memory_config = config.get("memory_config") or {}
         memory = self.memory
-        history: List[Dict[str, str]] = []
+        history_text = ""
         if session_id and memory_config.get("enable_short_term", True):
             if memory is None:
                 memory = MemorySystem()
-            history = await asyncio.to_thread(
-                memory.get_short_term_memory,
-                session_id,
-                min(max(int(memory_config.get("window_size", 10)), 1), 50),
+            history_text = await asyncio.to_thread(
+                memory.get_context, session_id, question,
+                window_size=memory_config.get("window_size", 10),
+                max_chars=memory_config.get("context_max_chars", 6000),
+                summarizer=lambda previous, messages, size: summarize_history(base_model, previous, messages, size),
+                summary_max_chars=memory_config.get("summary_max_chars", 1200),
+                enable_summary=memory_config.get("enable_summary", True),
+                relevant_history_top_k=memory_config.get("relevant_history_top_k", 3),
             )
-
-        history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history)
         durable_memories: List[Dict[str, Any]] = []
         if user_id is not None and memory_config.get("enable_long_term"):
             try:

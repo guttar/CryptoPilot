@@ -164,12 +164,25 @@ Authorization: Bearer <token>
 ```text
 run.started
 agent.thinking
+answer.delta
 tool.started
 retrieval.started
 retrieval.completed
 tool.completed
 run.completed | run.failed | run.timed_out | run.cancelled
 ```
+
+直接 Agent Run 的最终答案使用模型 `astream` 输出 `answer.delta`，事件会持久化并可补读。
+关联单 Agent 的聊天转发最终答案片段；多个 Agent 先完成分析，再流式生成汇总答案。
+工具决策和中间草稿不作为最终答案输出。流式最终整理会额外调用一次模型；普通非流式
+运行保留原先调用流程。流中断返回失败状态，不把未完成文本当作成功答案。
+
+同一 Agent 的多次检索共享引用编号；多个 Agent 汇总前按知识库与分块身份统一编号，
+同步改写子答案中的引用，避免不同来源都叫 `[KB1]`。编号统一不代表已验证结论的正确性。
+
+聊天 SSE 只有生成完成且交互记录提交数据库后才发送 `done`。模型失败、提前结束或
+数据库提交失败会发送 `error`，不把部分回答写入成功对话或短期记忆；断开连接会取消
+仍在执行的关联 Agent。外部模型或线程内同步调用的停止仍取决于客户端实现。
 
 ## 目录结构
 
@@ -195,6 +208,25 @@ CryptoPilot/
 ```
 
 ## 测试与构建
+
+### 会话上下文配置
+
+Agent 和普通 Assistant 的 `memory_config` 支持 `enable_summary`（默认 true）、
+`window_size`（最近消息条数）、`summary_max_chars`（默认 1200）和
+`context_max_chars`（默认 6000）。超过窗口的消息会由模型增量压缩为历史摘要，
+摘要与最近消息共同作为上下文，不作为外部事实证据。Redis 使用 WATCH 事务避免
+摘要覆盖并发写入；摘要失败时保留原始消息并退回最近窗口。摘要、原始消息和历史归档
+均有 TTL，删除会话时一并清除。字符预算是明确的大小上限，不等同于精确 Token 计数；
+摘要调用会产生额外模型费用。Redis 历史缓冲默认最多保存 100 条消息。
+
+`relevant_history_top_k`（默认 3，最多 10）按当前问题的英文词项和中文双字词项，
+从最近 50 条已归档消息中选择相关历史轮次，并保留该轮的用户问题和助手回答。
+相关历史与摘要共享上下文字符预算；这是可解释的词项匹配，不是语义向量召回。
+近期消息始终优先，长期偏好仍由独立的用户记忆集合管理。
+
+普通 Assistant 的流式和非流式问答也支持真实长期记忆召回，由认证接口传入用户身份，
+不接受模型选择用户。`long_term_top_k` 默认 3，`long_term_max_chars` 默认 2000。
+关闭短期记忆时不读写短期窗口；缺少用户身份或记忆服务不可用时，不访问其他用户数据。
 
 ```bash
 python -m unittest discover -s tests -v

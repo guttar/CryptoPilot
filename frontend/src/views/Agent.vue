@@ -113,7 +113,13 @@
             <el-form-item label="窗口大小" v-if="form.memory_config.enable_short_term">
               <el-input-number v-model="form.memory_config.window_size" :min="1" :max="50" />
             </el-form-item>
-             <el-form-item label="长期记忆">
+            <el-form-item label="历史摘要" v-if="form.memory_config.enable_short_term">
+              <el-switch v-model="form.memory_config.enable_summary" />
+            </el-form-item>
+            <el-form-item label="会话上下文字符上限" v-if="form.memory_config.enable_short_term">
+              <el-input-number v-model="form.memory_config.context_max_chars" :min="256" :max="32000" :step="1000" />
+            </el-form-item>
+            <el-form-item label="长期记忆">
               <el-switch v-model="form.memory_config.enable_long_term" active-text="开启" inactive-text="关闭" />
             </el-form-item>
             <el-form-item label="长期记忆 Top K" v-if="form.memory_config.enable_long_term">
@@ -317,7 +323,7 @@ const form = reactive({
     enable_rerank: true
   },
   memory_config: {
-    enable_short_term: true,
+    enable_short_term: true, enable_summary: true, context_max_chars: 6000,
     window_size: 10,
     enable_long_term: false,
     long_term_top_k: 3
@@ -399,7 +405,7 @@ const openDialog = (row = null) => {
     // Load config fields, providing defaults if null
     form.tools_config = row.tools_config || { tools: [], permissions: [] }
     form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', dense_weight: 0.5, top_k: 5, enable_rerank: true, ...(row.knowledge_config || {}) }
-    form.memory_config = { enable_short_term: true, window_size: 10, enable_long_term: false, long_term_top_k: 3, ...(row.memory_config || {}) }
+    form.memory_config = { enable_short_term: true, enable_summary: true, context_max_chars: 6000, window_size: 10, enable_long_term: false, long_term_top_k: 3, ...(row.memory_config || {}) }
     form.reasoning_config = row.reasoning_config || { max_steps: 10, allow_parallel: true }
     form.security_config = row.security_config || { safety_level: 'moderate', allowed_actions: [], allow_internet: false }
     form.interaction_config = row.interaction_config || { output_format: 'markdown', response_style: 'professional', clarify_enabled: true }
@@ -418,7 +424,7 @@ const openDialog = (row = null) => {
     
     form.tools_config = { tools: [], permissions: [] }
     form.knowledge_config = { kb_ids: [], recall_strategy: 'hybrid', dense_weight: 0.5, top_k: 5, enable_rerank: true }
-    form.memory_config = { enable_short_term: true, window_size: 10, enable_long_term: false, long_term_top_k: 3 }
+    form.memory_config = { enable_short_term: true, enable_summary: true, context_max_chars: 6000, window_size: 10, enable_long_term: false, long_term_top_k: 3 }
     form.reasoning_config = { max_steps: 10, allow_parallel: true }
     form.security_config = { safety_level: 'moderate', allowed_actions: [], allow_internet: false }
     form.interaction_config = { output_format: 'markdown', response_style: 'professional', clarify_enabled: true }
@@ -509,6 +515,9 @@ const applyRunEvent = (event) => {
   }
   if (event.event_type === 'run.completed') {
     runAnswer.value = event.payload.answer || ''
+  }
+  if (event.event_type === 'answer.delta') {
+    runAnswer.value += event.payload.content || ''
   }
 }
 

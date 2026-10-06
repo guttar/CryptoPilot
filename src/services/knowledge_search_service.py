@@ -74,6 +74,7 @@ class KnowledgeSearchService:
         return {
             "citation_id": f"KB{index}",
             "chunk_id": result.id,
+            "kb_id": metadata.get("kb_id"),
             "text": result.text,
             "score": float(result.score),
             "source": metadata.get("filename") or metadata.get("source") or "unknown",

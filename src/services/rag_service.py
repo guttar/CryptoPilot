@@ -1,11 +1,10 @@
 from typing import AsyncIterator, List, Dict, Any, Optional
 from src.retrieval.hybrid_retriever import HybridRetriever
-from src.retrieval.reranker import DashScopeReranker
-from src.llm.llm_client import LLMClient
 from src.utils.logger import logger
 from src.settings import settings
-from src.services.question_analyzer import QuestionAnalyzer
 from src.services.memory_service import MemorySystem
+from src.services.conversation_context import summarize_history
+import asyncio
 
 class RAGService:
     """
@@ -21,6 +20,9 @@ class RAGService:
         
         初始化向量检索器、LLM客户端、重排序器、问题分析器和记忆系统等核心组件。
         """
+        from src.retrieval.reranker import DashScopeReranker
+        from src.llm.llm_client import LLMClient
+        from src.services.question_analyzer import QuestionAnalyzer
         self.retriever = HybridRetriever()
         self.llm_client = LLMClient()
         self.reranker = DashScopeReranker()
@@ -33,7 +35,8 @@ class RAGService:
         top_k: int = 5, 
         session_id: str = "default", 
         kb_ids: Optional[List[int]] = None,
-        assistant_config: Optional[Dict[str, Any]] = None
+        assistant_config: Optional[Dict[str, Any]] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         执行查询操作
@@ -74,26 +77,16 @@ class RAGService:
         # model = assistant_config.get("llm_model") # 如果LLM客户端支持则传递
         
         # 0. 获取历史对话（短期记忆）
-        memory_config = assistant_config.get("memory_config", {}) if assistant_config else {}
-        enable_short_term = memory_config.get("enable_short_term", True) # 如果未指定则默认为True
+        memory_config = (assistant_config or {}).get("memory_config") or {}
+        enable_short_term = memory_config.get("enable_short_term", memory_config.get("enable", True))
         window_size = memory_config.get("window_size", 10)
         
-        history = []
+        history_str = ""
         if enable_short_term:
-            history = self.memory.get_short_term_memory(session_id, limit=window_size)
-            
-        history_str = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+            history_str = self._history_context(session_id, query_text, memory_config)
         
-        # 长期记忆注入（占位符/模拟）
-        enable_long_term = memory_config.get("enable_long_term", False)
-        long_term_context = ""
-        if enable_long_term:
-            # 在实际系统中，我们会嵌入查询并搜索长期向量存储
-            # 目前我们模拟这个功能或仅记录日志
-            logger.info(f"Long-term memory enabled for session {session_id}")
-            # long_term_memories = self.memory.retrieve_long_term_memory(query_text)
-            # long_term_context = "\n".join([m['content'] for m in long_term_memories])
-            pass
+        long_term_context = self._long_term_context(user_id, query_text, memory_config)
+        history_str = "\n\n".join(part for part in [history_str, long_term_context] if part)
 
         # 1. 分析问题（结合历史对话）
         # 如果没有知识库，则处于"通用聊天"模式
@@ -101,9 +94,7 @@ class RAGService:
         if not kb_ids:
             # 通用聊天模式
             logger.info("No KB selected, using General Chat Mode")
-            context = f"历史对话:\n{history_str}" if history else ""
-            if long_term_context:
-                context = f"长期记忆:\n{long_term_context}\n\n{context}"
+            context = f"历史对话:\n{history_str}" if history_str else ""
                 
             if system_prompt:
                 context = f"系统指令: {system_prompt}\n\n{context}"
@@ -113,8 +104,9 @@ class RAGService:
             answer = self.llm_client.generate_general_response(query_text, context)
             
             # 更新记忆
-            self.memory.add_short_term_memory(session_id, "user", query_text)
-            self.memory.add_short_term_memory(session_id, "assistant", answer)
+            if enable_short_term:
+                self.memory.add_short_term_memory(session_id, "user", query_text)
+                self.memory.add_short_term_memory(session_id, "assistant", answer)
             
             return {
                 "query": query_text,
@@ -123,7 +115,7 @@ class RAGService:
             }
 
         # RAG模式
-        contextual_query = f"历史对话:\n{history_str}\n当前问题: {query_text}" if history else query_text
+        contextual_query = f"历史对话:\n{history_str}\n当前问题: {query_text}" if history_str else query_text
         analysis = self.analyzer.analyze(contextual_query)
         logger.info(f"Question Analysis: {analysis}")
 
@@ -139,8 +131,9 @@ class RAGService:
             )
         
         # 2. 更新短期记忆
-        self.memory.add_short_term_memory(session_id, "user", query_text)
-        self.memory.add_short_term_memory(session_id, "assistant", result["answer"])
+        if enable_short_term:
+            self.memory.add_short_term_memory(session_id, "user", query_text)
+            self.memory.add_short_term_memory(session_id, "assistant", result["answer"])
         
         return result
 
@@ -151,6 +144,7 @@ class RAGService:
         session_id: str = "default",
         kb_ids: Optional[List[int]] = None,
         assistant_config: Optional[Dict[str, Any]] = None,
+        user_id: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """执行流式查询，逐 token 产出事件。
 
@@ -171,17 +165,18 @@ class RAGService:
         }
         enable_rerank = settings.ENABLE_RERANK and bool(rag_config.get("enable_rerank", True))
         rerank_top_n = min(max(int(rag_config.get("rerank_top_n", top_k)), 1), top_k)
-        memory_config = assistant_config.get("memory_config", {}) if assistant_config else {}
-        enable_short_term = memory_config.get("enable_short_term", True)
+        memory_config = (assistant_config or {}).get("memory_config") or {}
+        enable_short_term = memory_config.get("enable_short_term", memory_config.get("enable", True))
 
-        history = []
+        history_str = ""
         if enable_short_term:
-            history = self.memory.get_short_term_memory(session_id, limit=10)
-        history_str = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+            history_str = await asyncio.to_thread(self._history_context, session_id, query_text, memory_config)
+        long_term_context = await asyncio.to_thread(self._long_term_context, user_id, query_text, memory_config)
+        history_str = "\n\n".join(part for part in [history_str, long_term_context] if part)
 
         # 通用聊天模式（无知识库）
         if not kb_ids:
-            context = f"历史对话:\n{history_str}" if history else ""
+            context = f"历史对话:\n{history_str}" if history_str else ""
             if system_prompt:
                 context = f"系统指令: {system_prompt}\n\n{context}"
             prompt = f"You are a helpful assistant.\n\n{context}\n\nUser Question: {query_text}\n\nAnswer:"
@@ -192,12 +187,12 @@ class RAGService:
 
         # RAG 模式：检索 → 重排序 → 流式生成
         initial_k = top_k * 2 if enable_rerank else top_k
-        search_results = self.retriever.retrieve(
+        search_results = await asyncio.to_thread(self.retriever.retrieve,
             query_text, top_k=initial_k, kb_ids=kb_ids, **retrieval_options
         )
 
         if enable_rerank and search_results:
-            search_results = self.reranker.rerank(query_text, search_results, rerank_top_n)
+            search_results = await asyncio.to_thread(self.reranker.rerank, query_text, search_results, rerank_top_n)
         else:
             search_results = search_results[:top_k]
 
@@ -236,6 +231,33 @@ class RAGService:
             ]
         }
         yield {"type": "done"}
+
+    def _history_context(self, session_id, query, config):
+        return self.memory.get_context(
+            session_id, query, window_size=config.get("window_size", 10),
+            max_chars=config.get("context_max_chars", 6000),
+            summary_max_chars=config.get("summary_max_chars", 1200),
+            enable_summary=config.get("enable_summary", True),
+            relevant_history_top_k=config.get("relevant_history_top_k", 3),
+            summarizer=lambda previous, messages, size: summarize_history(self.llm_client.llm, previous, messages, size),
+        )
+
+    def _long_term_context(self, user_id, query, config):
+        if not config.get("enable_long_term") or user_id is None:
+            return ""
+        try:
+            memories = self.memory.retrieve_long_term_memory(
+                user_id=int(user_id), query=query,
+                top_k=min(max(int(config.get("long_term_top_k", 3)), 1), 10),
+            )
+            if not memories:
+                return ""
+            budget = min(max(int(config.get("long_term_max_chars", 2000)), 128), 8000)
+            text = "\n".join(f"- {item.get('text', '')}" for item in memories)[:budget]
+            return "长期记忆（仅作用户上下文，不作为外部事实证据）：\n" + text
+        except Exception as exc:
+            logger.warning(f"Long-term recall unavailable: {exc}")
+            return ""
 
     def _single_hop_query(
         self, 

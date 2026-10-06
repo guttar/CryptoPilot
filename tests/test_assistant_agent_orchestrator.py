@@ -37,6 +37,57 @@ class FakeAgentService:
 
 
 class AssistantAgentOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    def test_distinct_child_sources_receive_distinct_global_citations(self):
+        original = [
+            {"answer": "first [KB1]", "tool_trace": [{"tool": "search_knowledge_base", "result": {
+                "citations": [{"citation_id": "KB1", "kb_id": 1, "chunk_id": "a"}]
+            }}]},
+            {"answer": "second [KB1]", "tool_trace": [{"tool": "search_knowledge_base", "result": {
+                "citations": [{"citation_id": "KB1", "kb_id": 2, "chunk_id": "b"}]
+            }}]},
+        ]
+        normalized = AssistantAgentOrchestrator._normalize_citations(original)
+        self.assertEqual(normalized[1]["answer"], "second [KB2]")
+        self.assertEqual(normalized[1]["tool_trace"][0]["result"]["citations"][0]["citation_id"], "KB2")
+        self.assertEqual(original[1]["answer"], "second [KB1]")
+
+    async def test_single_agent_streaming_is_forwarded_before_completion(self):
+        events = []
+        class StreamingAgent(FakeAgentService):
+            async def run(self, question, config, **kwargs):
+                self.assert_stream = kwargs["stream_answer"]
+                await kwargs["emit"]("answer.delta", {"content": "first "})
+                await asyncio.sleep(0)
+                await kwargs["emit"]("answer.delta", {"content": "second"})
+                return {"answer": "first second", "tool_trace": []}
+        async def emit(name, payload):
+            events.append((name, payload))
+        service = AssistantAgentOrchestrator(agent_service_factory=lambda: StreamingAgent([]))
+        result = await service.run(question="q", agents=[{"id": 1, "config": {}}],
+                                   session_id="s", user_id=1, stream_answer=True, emit=emit)
+        self.assertEqual(result["answer"], "first second")
+        self.assertEqual([p["content"] for n, p in events if n == "answer.delta"], ["first ", "second"])
+        self.assertEqual(events[-1][0], "agent.completed")
+
+    async def test_multi_agent_streams_synthesis_not_interleaved_child_answers(self):
+        events = []
+        calls = []
+        class Model:
+            async def astream(self, messages):
+                from langchain_core.messages import AIMessageChunk
+                yield AIMessageChunk(content="merged ")
+                yield AIMessageChunk(content="answer")
+        async def emit(name, payload):
+            events.append((name, payload))
+        service = AssistantAgentOrchestrator(agent_service_factory=lambda: FakeAgentService(calls),
+                                             llm_factory=Model)
+        result = await service.run(question="q", agents=[
+            {"id": 1, "config": {"name": "a"}}, {"id": 2, "config": {"name": "b"}},
+        ], session_id="s", user_id=1, stream_answer=True, emit=emit)
+        self.assertTrue(all(not call["stream_answer"] for call in calls))
+        self.assertEqual(result["answer"], "merged answer")
+        self.assertEqual([p["content"] for n, p in events if n == "answer.delta"], ["merged ", "answer"])
+
     async def test_single_agent_returns_answer_and_scoped_sources(self):
         calls = []
         events = []

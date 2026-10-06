@@ -21,6 +21,14 @@ rag_service = RAGService()
 memory_system = MemorySystem()
 
 
+def _persist_stream_answer(session_id, kb_id, query, answer, sources, trace):
+    with SessionLocal() as db:
+        db.add(ChatInteraction(session_id=session_id, kb_id=kb_id, query=query,
+                               answer=answer, retrieved_docs=sources or [],
+                               metrics={"agent_events": trace}))
+        db.commit()
+
+
 def _agent_config(agent: Agent) -> dict:
     """Create an immutable configuration snapshot for an Assistant chat turn."""
     return {
@@ -225,6 +233,7 @@ async def chat(
             session_id=session_uid,
             kb_ids=valid_kb_ids,
             assistant_config=assistant_config,
+            user_id=current_user.id,
         )
     
     # 保存交互记录到数据库
@@ -302,12 +311,15 @@ async def chat_stream(
         if chat_session.user_id != current_user.id:
             raise HTTPException(status_code=403, detail="Not authorized to access this session")
 
+    chat_session_id = chat_session.id
+
     async def event_generator():
         """SSE 事件生成器：逐 token 推送，流结束后保存交互记录。"""
         full_answer = ""
         source_docs = None
         agent_trace = []
         agent_task = None
+        completed = False
 
         # 立即推送 session_id，方便前端追踪新会话
         yield f"data: {json.dumps({'type': 'session_id', 'session_id': session_uid}, ensure_ascii=False)}\n\n"
@@ -317,9 +329,10 @@ async def chat_stream(
                 event_queue: asyncio.Queue = asyncio.Queue()
 
                 async def emit(event_type: str, payload: dict) -> None:
-                    await event_queue.put(
-                        {"type": "agent_event", "event": event_type, "data": payload}
-                    )
+                    if event_type == "answer.delta":
+                        await event_queue.put({"type": "token", "content": payload["content"]})
+                    else:
+                        await event_queue.put({"type": "agent_event", "event": event_type, "data": payload})
 
                 agent_task = asyncio.create_task(
                     AssistantAgentOrchestrator().run(
@@ -328,6 +341,7 @@ async def chat_stream(
                         session_id=session_uid,
                         user_id=current_user.id,
                         emit=emit,
+                        stream_answer=True,
                     )
                 )
                 while not agent_task.done() or not event_queue.empty():
@@ -335,15 +349,19 @@ async def chat_stream(
                         event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                     except asyncio.TimeoutError:
                         continue
-                    agent_trace.append(event)
+                    if event["type"] == "token":
+                        full_answer += event["content"]
+                    else:
+                        agent_trace.append(event)
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
                 result = await agent_task
+                if not full_answer and result["answer"]:
+                    yield f"data: {json.dumps({'type': 'token', 'content': result['answer']}, ensure_ascii=False)}\n\n"
                 full_answer = result["answer"]
                 source_docs = result.get("source_documents", [])
-                yield f"data: {json.dumps({'type': 'token', 'content': full_answer}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps({'type': 'sources', 'data': source_docs}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+                completed = True
             else:
                 async for event in rag_service.query_stream(
                     query_text=request.query,
@@ -351,12 +369,28 @@ async def chat_stream(
                     session_id=session_uid,
                     kb_ids=valid_kb_ids,
                     assistant_config=assistant_config,
+                    user_id=current_user.id,
                 ):
                     if event["type"] == "token":
                         full_answer += event["content"]
                     elif event["type"] == "sources":
                         source_docs = event["data"]
+                    elif event["type"] == "done":
+                        completed = True
+                        continue
+                    elif event["type"] == "error":
+                        raise RuntimeError(event.get("message", "Generation failed"))
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if not completed:
+                raise RuntimeError("Answer stream ended before completion")
+            await asyncio.to_thread(_persist_stream_answer, chat_session_id,
+                                    valid_kb_ids[0] if valid_kb_ids else None,
+                                    request.query, full_answer, source_docs, agent_trace)
+            memory_config = assistant_config.get("memory_config") or {}
+            if memory_config.get("enable_short_term", memory_config.get("enable", True)):
+                await asyncio.to_thread(memory_system.add_short_term_memory, session_uid, "user", request.query)
+                await asyncio.to_thread(memory_system.add_short_term_memory, session_uid, "assistant", full_answer)
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
         except asyncio.CancelledError:
             if agent_task and not agent_task.done():
                 agent_task.cancel()
@@ -366,30 +400,9 @@ async def chat_stream(
             logger.error(f"Streaming error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
         finally:
-            # 保存到记忆系统
-            if full_answer:
-                try:
-                    memory_system.add_short_term_memory(session_uid, "user", request.query)
-                    memory_system.add_short_term_memory(session_uid, "assistant", full_answer)
-                except Exception as e:
-                    logger.error(f"Failed to save memory: {e}")
-
-                # 保存交互到数据库（使用独立会话）
-                try:
-                    new_db = SessionLocal()
-                    interaction = ChatInteraction(
-                        session_id=chat_session.id,
-                        kb_id=valid_kb_ids[0] if valid_kb_ids else None,
-                        query=request.query,
-                        answer=full_answer,
-                        retrieved_docs=source_docs or [],
-                        metrics={"agent_events": agent_trace}
-                    )
-                    new_db.add(interaction)
-                    new_db.commit()
-                    new_db.close()
-                except Exception as e:
-                    logger.error(f"Failed to save interaction: {e}")
+            if agent_task and not agent_task.done():
+                agent_task.cancel()
+                await asyncio.gather(agent_task, return_exceptions=True)
 
     return StreamingResponse(
         event_generator(),
